@@ -19,10 +19,12 @@ class Agent:
         name: str,
         system_prompt: str,
         llm: LLMClient,
+        is_main_agent: bool,
         tools: Optional[List[Any]] = None,
         max_iters: int = 10,
         temperature: float = 0.3,
         max_tokens: int = 2048,
+        trace: Optional[List[str]] = None,
     ) -> None:
         self.name = name
         self.system_prompt = system_prompt
@@ -32,17 +34,27 @@ class Agent:
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.tools_json = self._build_tool_json(tools)
+        # agent 调用链: 每次模型请求都发送, 末位始终是当前 agent。
+        # 默认从当前 agent 名开始(主 agent 即 ["main"]); 子 agent 由父级传入
+        # 完整调用链(如 ["main","sub"])。LMInfer 按 trace 末位判定 KV 段类型
+        # (main / sub), 子 agent 若带 ["main"] 会被当成 main 段, 覆盖主段。
+        self.trace = list(trace) if trace is not None else [self.name]
 
     def run(self, task: str) -> str:
         messages: List[Dict[str, Any]] = [self._first_message(task)]
 
         for step in range(1, self.max_iters + 1):
-            assistant = self.llm.chat(messages, max_tokens=self.max_tokens, tools=self.tools_json)
-            messages.append(assistant)
+            assistant = self.llm.chat(
+                messages,
+                max_tokens=self.max_tokens,
+                tools=self.tools_json,
+                trace=self.trace
+            )
 
             tool_calls = assistant.get("tool_calls") or []
             if not tool_calls:
                 final = assistant.get("content") or ""
+                print(self.trace)
                 return final
 
             for call in tool_calls:
@@ -56,6 +68,8 @@ class Agent:
                     "name": name,  # 文本协议后端用它格式化「[工具结果] 工具名: ...」
                     "content": result,
                 })
+            if self.name == "main":
+                self.trace.append("main")
 
         raise RuntimeError(f"[{self.name}] 达到最大迭代次数 {self.max_iters}，任务未完成")
 
@@ -85,25 +99,23 @@ class Agent:
             if "name" in (tool.parameters.get("properties") or {}) and "name" not in arguments:
                 arguments = dict(arguments)
                 arguments["name"] = alias_for
-            self.trace.log(
-                self.name,
-                f"别名 {name!r} -> {tool.name}({json.dumps(arguments, ensure_ascii=False)})",
-            )
         if tool.root_only and not self.is_root:
             return (
                 f"ERROR: 工具 {name!r} 只能由 main agent 调用，sub agent 禁止继续向下"
                 f"分派（最多两级 agent）；请直接作答，或改用你自带的普通工具。"
             )
+        # Add LLMClient to SubAgent Args
+        if name == "call_subagent":
+            self.trace.append("sub")  # 子 agent 的请求链以 "sub" 结尾(LMInfer 按末位定段)
+            arguments["client"] = self.llm
+            arguments["trace"] = list(self.trace)  # 完整调用链传给子 agent, 其请求直接沿用
         try:
-            # Add LLMClient to SubAgent Args
-            if name == "call_subagent":
-                arguments["client"] = self.llm
             result = tool.call(arguments)
-            if not isinstance(result, str):
-                result = json.dumps(result, ensure_ascii=False, default=str)
-            return result
         except Exception as exc:
-            return f"ERROR: 工具 {name} 执行失败: {exc!r}"
+            result = f"ERROR: 工具 {name} 执行失败: {exc!r}"
+        if not isinstance(result, str):
+            result = json.dumps(result, ensure_ascii=False, default=str)
+        return result
         
     def _build_tool_json(self, tools_list):
         tools_json = []

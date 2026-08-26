@@ -7,16 +7,23 @@ from agent.tools import *
 client = LLMClient(
     base_url="http://localhost:8000/v1",
     api_key="EMPTY",
-    model="Qwen3-8B"
+    model="Qwen3-8B",
+    agent_mode=True
 )
 
-system_prompt = "You are an AI agent capable of solving complex tasks. You can independently plan, execute tasks step by step, and verify the results. You have access to tools for calling SubAgents, allowing you to decompose a task into multiple subtasks and delegate them to SubAgents. SubAgents have access to common file operations, such as file reading and file searching."
+system_prompt = (
+    "You are an AI agent capable of solving complex tasks. You can independently plan, execute "
+    "tasks step by step, and verify the results. You have access to tools for calling SubAgents, "
+    "allowing you to decompose a task into multiple subtasks and delegate them to SubAgents. "
+    "SubAgents have access to common file operations, such as file reading and file searching.\n"
+    "\n"
+    "**Tool call discipline (hard constraint):** In EVERY reply, you must invoke AT MOST ONE "
+    "tool call. If you need to call a SubAgent several times, do it strictly one at a time: "
+    "call the first SubAgent, wait for its returned result, then in a SEPARATE reply call the "
+    "next one. Never include two or more tool calls in the same reply."
+)
 
-main_agent = Agent(name="main", system_prompt=system_prompt, llm=client, max_tokens=10240, tools=build_subagent_tools())
-
-# task = "/home/tanger/workspace/BenchAgent/data/longbench.jsonl 里面含有 5 个问题，每个问题都能从所给的 file_path 文档中找到答案，请你依次调用 SubAgent，将 5 个任务逐个求解，逐个派发给 SubAgent，最后做一次答案汇总"
-
-# task = "列出 /home/tanger/workspace/BenchAgent/data 下的所有文件"
+main_agent = Agent(name="main", system_prompt=system_prompt, llm=client, is_main_agent=True, max_tokens=10240, tools=build_subagent_tools())
 
 task = """
 There are five questions:
@@ -33,7 +40,16 @@ Please complete the tasks using the following agent invocation chain:
 
 **main → sub → main → sub → ... → main**
 
-The main agent should call a SubAgent to answer each question sequentially, one at a time. The SubAgent should provide the final answer as concisely as possible. After completing all five questions, the main agent should summarize the answers to all five questions.
+Strict execution rules (hard constraints, do not deviate):
+
+1. The main agent answers the five questions **strictly one by one**: call a SubAgent for
+   question 1, wait for its answer, then call a SubAgent for question 2, and so on.
+2. **Each reply may contain AT MOST ONE tool call.** Calling two or more SubAgents in a single
+   reply is FORBIDDEN.
+3. Never proceed to the next question before the previous SubAgent's answer has been returned
+   to you.
+4. The SubAgent should provide the final answer as concisely as possible. After completing all
+   five questions, the main agent should summarize the answers to all five questions.
 
 **Final Output Requirements:**
 
@@ -54,7 +70,12 @@ The keys must be exactly `answer1`, `answer2`, `answer3`, `answer4`, and `answer
 Do not include any additional keys, explanations, Markdown, or text outside the JSON object. The final response must contain only the JSON object.
 """
 
-answer = main_agent.run(task)
+try:
+    answer = main_agent.run(task)
+finally:
+    # 整个任务结束后再释放会话 KV: 主/子 agent 共用同一 client,
+    # 中途释放会清空会话 KV 段, 使 --reuse-agent-kv-append 失效
+    client.release_kv()
 
 print("[answer]")
 print(answer)

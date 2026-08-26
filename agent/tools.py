@@ -105,12 +105,12 @@ def _tool_search_files(pattern: str, path: str = ".") -> str:
         return f"（没有匹配 {pattern!r} 的文件）"
     return "\n".join(matches)
 
-def _call_subagent(task: str, client: LLMClient) -> str:
+def _call_subagent(task: str, client: LLMClient, trace: Optional[List[str]] = None) -> str:
     system_prompt = "You are a sub-agent responsible for completing subtasks delegated by the main AI agent. You are capable of solving complex tasks and completing assigned subtasks accurately. You have access to common file-reading and file-search tools."
-    sub_agent = Agent(name="sub", system_prompt=system_prompt, llm=client, max_tokens=10240, tools=build_file_tools())
+    sub_agent = Agent(name="sub", system_prompt=system_prompt, llm=client, is_main_agent=False, max_tokens=10240, tools=build_file_tools(), trace=trace)
     content = sub_agent.run(task)
     content = strip_think(content)
-    
+
     return content
 
 def build_subagent_tools() -> List[Tool]:
