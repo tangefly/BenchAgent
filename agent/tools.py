@@ -44,8 +44,13 @@ class Tool:
     def call(self, arguments: Dict[str, Any]) -> Any:
         return self.func(**arguments)
 
-def _tool_read_file(path: str, line_start: int = 1, line_end: Optional[int] = None) -> str:
-    """读取文本文件（带行号，可指定行范围）；失败时返回 ERROR 文本让模型自行调整。"""
+def _tool_read_file(
+    path: str,
+    line_start: int = 1,
+    line_end: Optional[int] = None,
+) -> str:
+    """读取文本文件，可指定行范围；失败时返回 ERROR 文本让模型自行调整。"""
+
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
@@ -60,24 +65,14 @@ def _tool_read_file(path: str, line_start: int = 1, line_end: Optional[int] = No
     start = max(1, line_start)
     end = len(lines) if line_end is None else min(len(lines), line_end)
     if start > end:
-        return f"ERROR: line_start({start}) > line_end({end})，文件共 {len(lines)} 行"
-    body = "".join(f"{i:>5} | {line}" for i, line in enumerate(lines[start - 1:end], start=start))
+        return (
+            f"ERROR: line_start({start}) > line_end({end})，"
+            f"文件共 {len(lines)} 行"
+        )
+    body = "".join(lines[start - 1:end])
     if end < len(lines):
         body += f"\n...(共 {len(lines)} 行，已按 line_end 截断)"
     return body
-
-
-def _tool_write_file(path: str, content: str) -> str:
-    """写入文件（自动创建父目录、覆盖已存在文件），返回写入结果。"""
-    try:
-        parent = os.path.dirname(os.path.abspath(path))
-        os.makedirs(parent, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(content)
-    except OSError as exc:
-        return f"ERROR: 写入 {path} 失败: {exc!r}"
-    return f"已写入 {path}（{len(content)} 字符）"
-
 
 def _tool_list_directory(path: str = ".") -> str:
     """列出目录条目（文件/子目录），失败返回 ERROR。"""
@@ -110,14 +105,9 @@ def _tool_search_files(pattern: str, path: str = ".") -> str:
         return f"（没有匹配 {pattern!r} 的文件）"
     return "\n".join(matches)
 
-def _call_subagent(task: str) -> str:
-    client = LLMClient(
-        base_url="http://localhost:8000/v1",
-        api_key="EMPTY",
-        model="Qwen3-8B"
-    )
-    system_prompt = "你是一个子 AI 智能体，负责完成主 AI 整体下派的子任务，具备解决复杂任务的能力，能够自主规划，逐步完成任务，并且验证结果。"
-    sub_agent = Agent(name="sub", system_prompt=system_prompt, llm=client, max_tokens=10240)
+def _call_subagent(task: str, client: LLMClient) -> str:
+    system_prompt = "You are a sub-agent responsible for completing subtasks delegated by the main AI agent. You are capable of solving complex tasks and completing assigned subtasks accurately. You have access to common file-reading and file-search tools."
+    sub_agent = Agent(name="sub", system_prompt=system_prompt, llm=client, max_tokens=10240, tools=build_file_tools())
     content = sub_agent.run(task)
     content = strip_think(content)
     
@@ -159,19 +149,6 @@ def build_file_tools() -> List[Tool]:
                 "required": ["path"],
             },
             func=_tool_read_file,
-        ),
-        Tool(
-            name="write_file",
-            description="把内容写入文件（自动创建父目录、覆盖已存在文件），用于产出代码、文档等。",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "要写入的文件路径"},
-                    "content": {"type": "string", "description": "完整的文件内容"},
-                },
-                "required": ["path", "content"],
-            },
-            func=_tool_write_file,
         ),
         Tool(
             name="list_directory",

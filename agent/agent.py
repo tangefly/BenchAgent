@@ -37,12 +37,7 @@ class Agent:
         messages: List[Dict[str, Any]] = [self._first_message(task)]
 
         for step in range(1, self.max_iters + 1):
-            print(f"==============[{step}]==============")
-            print(f"[messages]")
-            print(messages)
             assistant = self.llm.chat(messages, max_tokens=self.max_tokens, tools=self.tools_json)
-            print(f"[assistant]")
-            print(assistant)
             messages.append(assistant)
 
             tool_calls = assistant.get("tool_calls") or []
@@ -100,6 +95,9 @@ class Agent:
                 f"分派（最多两级 agent）；请直接作答，或改用你自带的普通工具。"
             )
         try:
+            # Add LLMClient to SubAgent Args
+            if name == "call_subagent":
+                arguments["client"] = self.llm
             result = tool.call(arguments)
             if not isinstance(result, str):
                 result = json.dumps(result, ensure_ascii=False, default=str)
