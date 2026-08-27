@@ -4,6 +4,7 @@ import json
 from typing import Any, Dict, List, Optional
 
 from .llm import LLMClient
+from .utils import strip_think
 
 def parse_json_arguments(raw: str) -> Dict[str, Any]:
     """解析模型返回的工具参数 JSON 字符串（解析失败或非对象时返回空 dict）。"""

@@ -25,7 +25,9 @@ system_prompt = (
 
 main_agent = Agent(name="main", system_prompt=system_prompt, llm=client, is_main_agent=True, max_tokens=10240, tools=build_subagent_tools())
 
-task = """
+file_path = "/home/tanger/workspace/BenchAgent/data/documents/doc1.txt"
+
+task = f"""
 There are five questions:
 
 1. Who played the role of Ken Neville in *Alias – the Bad Man*?
@@ -36,7 +38,7 @@ There are five questions:
 
 All five questions must be answered using the information contained in:
 
-`/home/xiaoxunpeng/workplace/BenchAgent/data/documents/doc1.txt`
+`{file_path}`
 
 You are the MainAgent. You must process the five questions through a strict sequential:
 
@@ -56,7 +58,7 @@ Hard execution constraints:
 
    * the current question;
    * the document path:
-     `/home/xiaoxunpeng/workplace/BenchAgent/data/documents/doc1.txt`
+     `{file_path}`
 
 5. The document path MUST be passed to the SubAgent on EVERY invocation. Do not rely on previous conversation context or previous SubAgent calls.
 
@@ -97,13 +99,13 @@ The final answer MUST be extremely concise. Each answer should contain only the 
 
 The final response MUST contain exactly these five keys:
 
-{
+{{
 "answer1": "Answer to question 1",
 "answer2": "Answer to question 2",
 "answer3": "Answer to question 3",
 "answer4": "Answer to question 4",
 "answer5": "Answer to question 5"
-}
+}}
 
 The keys MUST correspond exactly to Q1–Q5.
 
@@ -125,10 +127,8 @@ Keep every answer as short as possible while preserving correctness.
 try:
     answer = main_agent.run(task)
 finally:
-    # 整个任务结束后再释放会话 KV: 主/子 agent 共用同一 client,
-    # 中途释放会清空会话 KV 段, 使 --reuse-agent-kv-append 失效
     pass
-    # client.release_kv()
+    client.release_kv()
 
 print("[answer]")
 print(answer)

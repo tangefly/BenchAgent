@@ -2,17 +2,11 @@ from __future__ import annotations
 
 import glob
 import os
-import re
 from typing import Any, Callable, Dict, List, Optional
 
 from .agent import Agent
 from .llm import LLMClient
-
-_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
-
-def strip_think(text: str) -> str:
-    """去掉 <think>...</think> 推理块（Qwen3 等模型会输出）。"""
-    return _THINK_RE.sub("", text).strip()
+from .utils import strip_think
 
 class Tool:
     def __init__(
@@ -46,8 +40,6 @@ class Tool:
 
 def _tool_read_file(
     path: str,
-    line_start: int = 1,
-    line_end: Optional[int] = None,
 ) -> str:
     """读取文本文件，可指定行范围；失败时返回 ERROR 文本让模型自行调整。"""
 
@@ -62,16 +54,7 @@ def _tool_read_file(
         return f"ERROR: 读取 {path} 失败: {exc!r}"
     if not lines:
         return "(空文件)"
-    start = max(1, line_start)
-    end = len(lines) if line_end is None else min(len(lines), line_end)
-    if start > end:
-        return (
-            f"ERROR: line_start({start}) > line_end({end})，"
-            f"文件共 {len(lines)} 行"
-        )
-    body = "".join(lines[start - 1:end])
-    if end < len(lines):
-        body += f"\n...(共 {len(lines)} 行，已按 line_end 截断)"
+    body = "".join(lines)
     return body
 
 def _tool_list_directory(path: str = ".") -> str:
@@ -143,8 +126,6 @@ def build_file_tools() -> List[Tool]:
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "要读取的文件路径"},
-                    "line_start": {"type": "integer", "description": "起始行号（从 1 开始，默认 1）"},
-                    "line_end": {"type": "integer", "description": "结束行号（默认读到底）"},
                 },
                 "required": ["path"],
             },
