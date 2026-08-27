@@ -34,40 +34,92 @@ There are five questions:
 4. What key contrast can be drawn between the fates of the two films described?
 5. What common narrative arc do the two films share regarding the female lead's relationship with the hero?
 
-Each question is based on `/home/tanger/workspace/BenchAgent/data/documents/doc1.txt`.
+All five questions must be answered using the information contained in:
 
-Please complete the tasks using the following agent invocation chain:
+`/home/xiaoxunpeng/workplace/BenchAgent/data/documents/doc1.txt`
 
-**main → sub → main → sub → ... → main**
+You are the MainAgent. You must process the five questions through a strict sequential:
 
-Strict execution rules (hard constraints, do not deviate):
+MainAgent → SubAgent → MainAgent → SubAgent → ... → MainAgent
 
-1. The main agent answers the five questions **strictly one by one**: call a SubAgent for
-   question 1, wait for its answer, then call a SubAgent for question 2, and so on.
-2. **Each reply may contain AT MOST ONE tool call.** Calling two or more SubAgents in a single
-   reply is FORBIDDEN.
-3. Never proceed to the next question before the previous SubAgent's answer has been returned
-   to you.
-4. The SubAgent should provide the final answer as concisely as possible. After completing all
-   five questions, the main agent should summarize the answers to all five questions.
+execution chain.
 
-**Final Output Requirements:**
+Hard execution constraints:
 
-The main agent must return the final result as a valid JSON object with exactly the following structure:
+1. Process the questions strictly in order: Q1 → Q2 → Q3 → Q4 → Q5.
 
-```json
+2. For each question, the MainAgent MUST invoke exactly one SubAgent and MUST wait for that SubAgent's response before processing the next question.
+
+3. Each assistant reply may contain AT MOST ONE tool call. NEVER invoke multiple SubAgents in the same reply.
+
+4. Every SubAgent invocation MUST explicitly include:
+
+   * the current question;
+   * the document path:
+     `/home/xiaoxunpeng/workplace/BenchAgent/data/documents/doc1.txt`
+
+5. The document path MUST be passed to the SubAgent on EVERY invocation. Do not rely on previous conversation context or previous SubAgent calls.
+
+6. The SubAgent MUST use the specified document as the source for answering the current question. It must not assume that the document content has already been provided.
+
+7. The SubAgent MUST answer ONLY the current question. It must not answer future questions or invoke another agent.
+
+8. The SubAgent response MUST be concise. Give only the information necessary to answer the current question. Avoid unnecessary explanation, background, reasoning, repetition, or restatement of the question.
+
+9. The MainAgent must retain the returned answer and then proceed to the next question only after the SubAgent response has been received.
+
+10. SubAgent calls MUST be strictly sequential and MUST NOT be parallelized.
+
+11. Do not skip any question or answer a question directly without first invoking its SubAgent.
+
+12. The logical execution sequence MUST be:
+
+Q1:
+MainAgent → SubAgent(question=Q1, document_path=...) → answer1
+
+Q2:
+MainAgent → SubAgent(question=Q2, document_path=...) → answer2
+
+Q3:
+MainAgent → SubAgent(question=Q3, document_path=...) → answer3
+
+Q4:
+MainAgent → SubAgent(question=Q4, document_path=...) → answer4
+
+Q5:
+MainAgent → SubAgent(question=Q5, document_path=...) → answer5
+
+Final Answer Requirements:
+
+After all five SubAgent calls are completed, the MainAgent MUST return the five answers in a valid JSON object.
+
+The final answer MUST be extremely concise. Each answer should contain only the minimum information needed to correctly answer its corresponding question. Do not include unnecessary explanations, reasoning, background information, or repeated context.
+
+The final response MUST contain exactly these five keys:
+
 {
-    "answer1": "Answer to question 1",
-    "answer2": "Answer to question 2",
-    "answer3": "Answer to question 3",
-    "answer4": "Answer to question 4",
-    "answer5": "Answer to question 5"
+"answer1": "Answer to question 1",
+"answer2": "Answer to question 2",
+"answer3": "Answer to question 3",
+"answer4": "Answer to question 4",
+"answer5": "Answer to question 5"
 }
-```
 
-The keys must be exactly `answer1`, `answer2`, `answer3`, `answer4`, and `answer5`, corresponding to questions 1–5 respectively.
+The keys MUST correspond exactly to Q1–Q5.
 
-Do not include any additional keys, explanations, Markdown, or text outside the JSON object. The final response must contain only the JSON object.
+The final response must contain ONLY the JSON object.
+
+Do NOT include:
+
+* Markdown
+* Code fences
+* Explanations
+* Reasoning
+* Additional keys
+* Additional text before or after the JSON
+* Unnecessary details in any answer
+
+Keep every answer as short as possible while preserving correctness.
 """
 
 try:
@@ -75,7 +127,8 @@ try:
 finally:
     # 整个任务结束后再释放会话 KV: 主/子 agent 共用同一 client,
     # 中途释放会清空会话 KV 段, 使 --reuse-agent-kv-append 失效
-    client.release_kv()
+    pass
+    # client.release_kv()
 
 print("[answer]")
 print(answer)
