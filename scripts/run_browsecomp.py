@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from datetime import datetime
 import json
 import re
 import sys
@@ -237,13 +238,19 @@ def parse_args() -> argparse.Namespace:
         "--output",
         type=Path,
         default=None,
-        help="Optional JSONL path for per-sample batch results.",
+        help=(
+            "JSONL path for per-sample model results. Defaults to a timestamped "
+            "file under outputs/browsecomp/."
+        ),
     )
     parser.add_argument(
         "--summary-output",
         type=Path,
         default=None,
-        help="Optional JSON path for aggregate metrics.",
+        help=(
+            "JSON path for aggregate metrics/final score. Defaults to the "
+            "per-sample output path with .summary.json."
+        ),
     )
     parser.add_argument(
         "--continue-on-error",
@@ -336,11 +343,31 @@ def write_jsonl_row(path: Path, row: Dict[str, Any]) -> None:
         handle.flush()
 
 
+def default_output_path(indices: List[int]) -> Path:
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    if len(indices) == 1:
+        selection = f"idx{indices[0]}"
+    else:
+        selection = f"n{len(indices)}_from{indices[0]}_to{indices[-1]}"
+    return ROOT / "outputs" / "browsecomp" / f"results_{selection}_{timestamp}.jsonl"
+
+
+def resolve_output_paths(args: argparse.Namespace, indices: List[int]) -> tuple[Path, Path]:
+    output = args.output or default_output_path(indices)
+    summary_output = args.summary_output or output.with_suffix(".summary.json")
+    return output, summary_output
+
+
 def run(args: argparse.Namespace) -> None:
     samples = load_samples(args.metadata)
     indices = selected_indices(len(samples), args)
-    is_batch = len(indices) != 1 or args.all or args.limit is not None or args.indices
+    output_path, summary_output_path = resolve_output_paths(args, indices)
     results: List[Dict[str, Any]] = []
+
+    print("[output]")
+    print(str(output_path))
+    print("[summary_output]")
+    print(str(summary_output_path))
 
     for ordinal, index in enumerate(indices, start=1):
         print(f"[progress] {ordinal}/{len(indices)}")
@@ -358,8 +385,7 @@ def run(args: argparse.Namespace) -> None:
             print(json.dumps(result, ensure_ascii=False, indent=2))
 
         results.append(result)
-        if args.output:
-            write_jsonl_row(args.output, result)
+        write_jsonl_row(output_path, result)
 
     summary = {
         "metadata": str(args.metadata),
@@ -369,16 +395,14 @@ def run(args: argparse.Namespace) -> None:
         "metrics": mean_scores(results),
     }
 
-    if is_batch:
-        print("[summary]")
-        print(json.dumps(summary, ensure_ascii=False, indent=2))
+    print("[summary]")
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
 
-    if args.summary_output:
-        args.summary_output.parent.mkdir(parents=True, exist_ok=True)
-        args.summary_output.write_text(
-            json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+    summary_output_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_output_path.write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
 
 if __name__ == "__main__":
