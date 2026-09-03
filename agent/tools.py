@@ -93,6 +93,9 @@ def _call_subagent(task: str, client: LLMClient, trace: Optional[List[str]] = No
     sub_agent = Agent(name="sub", system_prompt=system_prompt, llm=client, is_main_agent=False, max_tokens=10240, tools=build_file_tools(), trace=trace)
     content = sub_agent.run(task)
     content = strip_think(content)
+    
+    print("[sub agent output]")
+    print(content)
 
     return content
 
@@ -101,12 +104,12 @@ def build_subagent_tools() -> List[Tool]:
         Tool(
             name="call_subagent",
             description=(
-                "调用 SubAgent，使用子智能体完成一个子任务。"
+                "Call a SubAgent to complete one delegated subtask."
             ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "task": {"type": "string", "description": "子智能体需要完成的任务，需要把完成子任务所需要的所有必要资料和条件传递进来"}
+                    "task": {"type": "string", "description": "The subtask for the SubAgent to complete. Include all necessary context, constraints, and source paths required to complete it."}
                 },
                 "required": ["task"],
             },
@@ -120,12 +123,12 @@ def build_file_tools() -> List[Tool]:
         Tool(
             name="read_file",
             description=(
-                "读取文本文件内容（带行号，可指定行范围），用于查看代码、文档、配置等本地文件。"
+                "Read the contents of a text file. Use this to inspect local code, documents, configuration files, or other text resources."
             ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "要读取的文件路径"},
+                    "path": {"type": "string", "description": "Path of the file to read."},
                 },
                 "required": ["path"],
             },
@@ -133,11 +136,11 @@ def build_file_tools() -> List[Tool]:
         ),
         Tool(
             name="list_directory",
-            description="列出目录下的条目（文件/子目录），用于了解项目结构。",
+            description="List entries in a directory, including files and subdirectories. Use this to inspect project structure.",
             parameters={
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "目录路径，默认当前目录"},
+                    "path": {"type": "string", "description": "Directory path. Defaults to the current directory."},
                 },
                 "required": [],
             },
@@ -145,12 +148,12 @@ def build_file_tools() -> List[Tool]:
         ),
         Tool(
             name="search_files",
-            description="按 glob 通配符模式递归搜索文件路径（如 *.py、**/test_*.py），用于定位文件。",
+            description="Recursively search for file paths using a glob pattern, such as *.py or **/test_*.py. Use this to locate files.",
             parameters={
                 "type": "object",
                 "properties": {
-                    "pattern": {"type": "string", "description": "glob 模式，如 *.py"},
-                    "path": {"type": "string", "description": "搜索起点目录，默认当前目录"},
+                    "pattern": {"type": "string", "description": "Glob pattern to match, such as *.py."},
+                    "path": {"type": "string", "description": "Directory where the recursive search starts. Defaults to the current directory."},
                 },
                 "required": ["pattern"],
             },

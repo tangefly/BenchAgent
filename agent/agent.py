@@ -52,12 +52,21 @@ class Agent:
                 trace=self.trace
             )
 
+            assistant_content = assistant.get("content")
+            if isinstance(assistant_content, str):
+                assistant_content = strip_think(assistant_content)
+
             tool_calls = assistant.get("tool_calls") or []
             if not tool_calls:
-                final = assistant.get("content") or ""
+                final = assistant_content or ""
                 print(self.trace)
                 return final
 
+            messages.append({
+                "role": "assistant",
+                "content": assistant_content or None,
+                "tool_calls": tool_calls,
+            })
             for call in tool_calls:
                 fn = call.get("function") or {}
                 name = fn.get("name", "")
@@ -87,7 +96,7 @@ class Agent:
         return None, None
 
     def _run_tool(self, name: str, arguments: Dict[str, Any]) -> str:
-        print(f"[Tool Call] {name}, {arguments}")
+        print(f"[{self.name} Tool Call] {name}, {arguments}")
         tool, alias_for = self._resolve_tool(name)
         if tool is None:
             alias_names = sorted(a for t in self.tools.values() for a in t.aliases)

@@ -128,7 +128,7 @@ try:
     answer = main_agent.run(task)
 finally:
     pass
-    client.release_kv()
+    # client.release_kv()
 
 print("[answer]")
 print(answer)

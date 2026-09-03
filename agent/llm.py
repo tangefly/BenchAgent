@@ -89,7 +89,7 @@ class LLMClient:
         messages: List[Dict[str, Any]],
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[str] = None,
-        temperature: float = 0.7,
+        temperature: float = 0.2,
         max_tokens: int = 2048,
         trace: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
