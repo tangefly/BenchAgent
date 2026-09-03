@@ -45,6 +45,8 @@ class LLMClient:
         self.timeout = timeout
         self.agent_mode = agent_mode
         self.enable_thinking = enable_thinking
+        self.session = requests.Session()
+        self.session.trust_env = False
         # agent 模式会话 id: 首次请求不带, 由 LMInfer 生成并在响应中带回, 之后自动复用
         self.session_id: Optional[str] = None
         # 最近一次响应的观测信息(LMInfer agent 模式专用, 验证 KV 复用用, 不改变返回结构):
@@ -63,7 +65,7 @@ class LLMClient:
         url = f"{self.base_url}/chat/completions"
         headers = {"Authorization": f"Bearer {self.api_key}"}
         try:
-            resp = requests.post(url, headers=headers, json=payload, timeout=self.timeout)
+            resp = self.session.post(url, headers=headers, json=payload, timeout=self.timeout)
             resp.raise_for_status()
         except requests.ConnectionError as exc:
             raise ConnectionError(
@@ -78,7 +80,7 @@ class LLMClient:
             ):
                 self.session_id = None
                 payload.pop("session_id", None)
-                resp = requests.post(url, headers=headers, json=payload, timeout=self.timeout)
+                resp = self.session.post(url, headers=headers, json=payload, timeout=self.timeout)
                 resp.raise_for_status()
             else:
                 raise
@@ -132,7 +134,7 @@ class LLMClient:
         url = f"{self.base_url}/release"
         headers = {"Authorization": f"Bearer {self.api_key}"}
         try:
-            resp = requests.post(url, headers=headers, json={"session_id": self.session_id}, timeout=self.timeout)
+            resp = self.session.post(url, headers=headers, json={"session_id": self.session_id}, timeout=self.timeout)
             resp.raise_for_status()
         except requests.ConnectionError as exc:
             raise ConnectionError(

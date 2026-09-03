@@ -30,6 +30,7 @@ class Agent:
         self.name = name
         self.system_prompt = system_prompt
         self.llm = llm
+        self.is_main_agent = is_main_agent
         self.tools: Dict[str, Any] = {t.name: t for t in (tools or [])}
         self.max_iters = max_iters
         self.temperature = temperature
@@ -47,6 +48,7 @@ class Agent:
         for step in range(1, self.max_iters + 1):
             assistant = self.llm.chat(
                 messages,
+                temperature=self.temperature,
                 max_tokens=self.max_tokens,
                 tools=self.tools_json,
                 trace=self.trace
@@ -109,7 +111,7 @@ class Agent:
             if "name" in (tool.parameters.get("properties") or {}) and "name" not in arguments:
                 arguments = dict(arguments)
                 arguments["name"] = alias_for
-        if tool.root_only and not self.is_root:
+        if tool.root_only and not self.is_main_agent:
             return (
                 f"ERROR: 工具 {name!r} 只能由 main agent 调用，sub agent 禁止继续向下"
                 f"分派（最多两级 agent）；请直接作答，或改用你自带的普通工具。"
