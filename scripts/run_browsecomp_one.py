@@ -12,7 +12,7 @@ if str(ROOT) not in sys.path:
 
 from agent.agent import Agent
 from agent.llm import LLMClient
-from agent.tools import build_file_tools
+from agent.tools import build_subagent_tools
 
 
 def load_sample(metadata_path: Path, index: int) -> Dict[str, Any]:
@@ -22,69 +22,63 @@ def load_sample(metadata_path: Path, index: int) -> Dict[str, Any]:
     return samples[index]
 
 
-def build_doc_task(query_id: str, query: str, doc_index: int, doc_path: str) -> str:
+def build_task(sample: Dict[str, Any]) -> str:
+    docs = "\n".join(
+        f"{idx}. {doc_path}" for idx, doc_path in enumerate(sample["evidence_docs"])
+    )
     return f"""
-You are a document-level research SubAgent for BrowseComp-plus.
+You are the MainAgent for one BrowseComp-plus deep research task.
 
-Your job is to inspect exactly one evidence document and extract information relevant to the query.
-
-query_id: {query_id}
-
-document_index: {doc_index}
-document_path: {doc_path}
-
-Query:
-{query}
-
-Hard constraints:
-1. You must use read_file on exactly this document_path: {doc_path}
-2. Do not read any other document.
-3. Do not use outside knowledge.
-4. Do not try to solve the whole multi-document task unless this single document is sufficient.
-5. Extract only facts that are supported by this document and useful for answering the query.
-6. Keep the response compact. Long copied passages are not allowed.
-
-Return only a valid JSON object with exactly these keys:
-{{
-  "document_index": {doc_index},
-  "document_path": "{doc_path}",
-  "relevant": true,
-  "candidate_answer": "answer candidate if this document supports one, otherwise empty string",
-  "findings": ["short supported fact 1", "short supported fact 2"],
-  "missing": ["query criteria not addressed by this document"]
-}}
-""".strip()
-
-
-def build_final_messages(sample: Dict[str, Any], doc_reports: List[str]) -> List[Dict[str, Any]]:
-    reports = "\n\n".join(
-        f"[Document report {idx}]\n{report}" for idx, report in enumerate(doc_reports)
-    )
-    system = (
-        "You are the MainAgent for a BrowseComp-plus deep research task. "
-        "Synthesize the final answer using only the document-level SubAgent reports. "
-        "Do not use outside knowledge."
-    )
-    user = f"""
 query_id: {sample["query_id"]}
 
 Query:
 {sample["query"]}
 
-SubAgent document reports:
-{reports}
+Evidence documents:
+{docs}
 
+Use SubAgents when document inspection is needed. The available documents are independent evidence candidates, so the efficient pattern is usually a fan-out/fan-in chain:
+MainAgent -> {{SubAgent(document 0), SubAgent(document 1), ...}} -> MainAgent.
+
+Planning guidance:
+1. You may decide how many SubAgents are needed, but prefer broad document coverage when the answer depends on several criteria spread across different evidence documents.
+2. For independent document checks, prefer issuing multiple call_subagent tool calls in the same assistant response instead of waiting for one result before starting the next.
+3. In this BrowseComp-plus item, each listed evidence document is a curated candidate. Unless one document clearly settles the full answer, inspect the remaining listed documents before final synthesis.
+4. Do not answer the query directly before you have enough document-backed evidence. If more document evidence is needed, call SubAgents first.
+5. Each call_subagent task should handle exactly one evidence document. Do not combine multiple documents in one SubAgent task.
+6. Create SubAgent tasks in listed document order when practical, so document_index values stay easy to compare.
+7. Every SubAgent invocation must include the query_id, the full query, the document_index, and the exact document_path.
+8. Each SubAgent must inspect exactly its assigned document_path, must not read any other document, and must not use outside knowledge.
+9. Each SubAgent should return compact evidence relevant to the query, preferably as a valid JSON object with keys document_index, document_path, relevant, candidate_answer, findings, and missing.
+10. Synthesize the final answer using only returned SubAgent tool results.
+
+For each SubAgent, use this task shape exactly, filling in that document's index and path:
+You are a document-level research SubAgent for BrowseComp-plus.
+Your job is to inspect exactly one evidence document and extract information relevant to the query.
+query_id: {sample["query_id"]}
+document_index: <document_index>
+document_path: <document_path>
+Query:
+{sample["query"]}
+Hard constraints:
+- You must use read_file on exactly this document_path.
+- Do not read any other document.
+- Do not use outside knowledge.
+- Do not try to solve the whole multi-document task unless this single document is sufficient.
+- Extract only facts that are supported by this document and useful for answering the query.
+- Keep the response compact. Long copied passages are not allowed.
+Return only a valid JSON object with exactly these keys: document_index, document_path, relevant, candidate_answer, findings, missing.
+
+Final Answer Requirements:
 Return only a valid JSON object with exactly these keys:
 {{
   "query_id": "{sample['query_id']}",
   "prediction": "final answer string",
-  "support": "brief explanation tying the relevant reports to the answer"
+  "support": "brief explanation tying the relevant SubAgent tool results to the answer"
 }}
 
 No markdown, no code fences, no extra text.
 """.strip()
-    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
-
 
 def normalize_answer(value: str) -> str:
     return " ".join(value.strip().lower().split())
@@ -106,16 +100,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--metadata",
         type=Path,
-        default=Path("/home/tanger/workspace/datasets/browsecomp-plus-100/metadata.json"),
+        default=Path("/home/tanger/workspace/datasets/browsecomp-plus-100/metadata1.json"),
     )
     parser.add_argument("--index", type=int, default=0)
     parser.add_argument("--base-url", default="http://localhost:8000/v1")
     parser.add_argument("--api-key", default="EMPTY")
     parser.add_argument("--model", default="Qwen3-8B")
     parser.add_argument("--temperature", type=float, default=0.0)
-    parser.add_argument("--sub-max-tokens", type=int, default=1024)
+    parser.add_argument("--sub-max-tokens", type=int, default=10240)
     parser.add_argument("--sub-max-iters", type=int, default=4)
-    parser.add_argument("--final-max-tokens", type=int, default=1024)
+    parser.add_argument("--final-max-tokens", type=int, default=10240)
     parser.add_argument("--timeout", type=float, default=600.0)
     parser.add_argument("--enable-thinking", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--show-sub-results", action=argparse.BooleanOptionalAction, default=True)
@@ -134,45 +128,32 @@ def run(args: argparse.Namespace) -> None:
         agent_mode=True,
         enable_thinking=args.enable_thinking,
     )
-    trace: List[str] = ["main"]
-    doc_reports: List[str] = []
+    system_prompt = (
+        "You are an AI agent that coordinates document-level SubAgents for "
+        "BrowseComp-plus. Use your judgment to decide how many SubAgents are "
+        "needed. When several independent evidence documents may contain different "
+        "criteria, prefer batching those SubAgent calls in one assistant message, "
+        "then synthesize the final answer only from returned tool results."
+    )
+    main_agent = Agent(
+        name="main",
+        system_prompt=system_prompt,
+        llm=client,
+        is_main_agent=True,
+        tools=build_subagent_tools(),
+        max_iters=max(len(sample["evidence_docs"]) + 3, 4),
+        temperature=args.temperature,
+        max_tokens=args.final_max_tokens,
+    )
 
     print(f"[sample] index={args.index} query_id={sample['query_id']} docs={len(sample['evidence_docs'])}")
 
     try:
-        for doc_index, doc_path in enumerate(sample["evidence_docs"]):
-            task = build_doc_task(sample["query_id"], sample["query"], doc_index, doc_path)
-            sub_trace = trace + ["sub"]
-            print(f"[subagent {doc_index}] document={doc_path}")
-            sub_agent = Agent(
-                name="sub",
-                system_prompt=(
-                    "You are a document-level research SubAgent. Use file tools to inspect "
-                    "only the assigned document and extract compact query-relevant evidence."
-                ),
-                llm=client,
-                is_main_agent=False,
-                tools=build_file_tools(),
-                max_iters=args.sub_max_iters,
-                temperature=args.temperature,
-                max_tokens=args.sub_max_tokens,
-                trace=sub_trace,
-            )
-            result = sub_agent.run(task)
-            doc_reports.append(result)
-            trace.append("sub")
-            if args.show_sub_results:
-                print(f"[subagent {doc_index} result]")
-                print(result)
-
-        trace.append("main")
-        final = client.chat(
-            build_final_messages(sample, doc_reports),
-            temperature=args.temperature,
-            max_tokens=args.final_max_tokens,
-            trace=trace,
-        )
-        answer = final.get("content") or ""
+        answer = main_agent.run(build_task(sample))
+        print("[final reused_prompt_tokens]")
+        print(client.last_reused_tokens)
+        print("[final usage]")
+        print(json.dumps(client.last_usage, ensure_ascii=False, indent=2))
         print("[prediction]")
         print(answer)
 
