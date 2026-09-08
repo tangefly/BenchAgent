@@ -42,8 +42,8 @@ MainAgent final answer requirements:
 try:
     answer = main_agent.run(task)
 finally:
-    # client.release_kv()
-    pass
+    if client.session_id:
+        client.release_kv()
 
 print("[answer]")
 print(answer)
