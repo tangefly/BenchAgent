@@ -114,7 +114,9 @@ class LLMClient:
         if tool_choice:
             payload["tool_choice"] = tool_choice
         if self.enable_thinking is not None:  # 请求级 thinking 开关(Qwen3 等)
+            # 统一请求兼容两端：LMInfer 读取顶层字段，vLLM 读取模板参数。
             payload["enable_thinking"] = self.enable_thinking
+            payload["chat_template_kwargs"] = {"enable_thinking": self.enable_thinking}
         if self.agent_mode:
             payload["mode"] = "agent"
             if self.session_id is not None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import glob
 import os
+from functools import partial
 from typing import Any, Callable, Dict, List, Optional
 
 from .agent import Agent
@@ -88,18 +89,23 @@ def _tool_search_files(pattern: str, path: str = ".") -> str:
         return f"（没有匹配 {pattern!r} 的文件）"
     return "\n".join(matches)
 
-def _call_subagent(task: str, client: LLMClient, trace: Optional[List[str]] = None) -> str:
+def _call_subagent(task: str, client: LLMClient, trace: Optional[List[str]] = None,
+                   *, temperature: float = 0.3, max_tokens: int = 10240,
+                   max_iters: int = 10, show_results: bool = True) -> str:
     system_prompt = "You are a sub-agent responsible for completing subtasks delegated by the main AI agent. You are capable of solving complex tasks and completing assigned subtasks accurately. You have access to common file-reading and file-search tools."
-    sub_agent = Agent(name="sub", system_prompt=system_prompt, llm=client, is_main_agent=False, max_tokens=10240, tools=build_file_tools(), trace=trace)
+    sub_agent = Agent(name="sub", system_prompt=system_prompt, llm=client, is_main_agent=False, temperature=temperature, max_tokens=max_tokens, max_iters=max_iters,
+                      tools=build_file_tools(), trace=trace)
     content = sub_agent.run(task)
     content = strip_think(content)
     
-    print("[sub agent output]")
-    print(content)
+    if show_results:
+        print("[sub agent output]")
+        print(content)
 
     return content
 
-def build_subagent_tools() -> List[Tool]:
+def build_subagent_tools(*, temperature: float = 0.3, max_tokens: int = 10240,
+                         max_iters: int = 10, show_results: bool = True) -> List[Tool]:
     return [
         Tool(
             name="call_subagent",
@@ -113,7 +119,8 @@ def build_subagent_tools() -> List[Tool]:
                 },
                 "required": ["task"],
             },
-            func=_call_subagent,
+            func=partial(_call_subagent, temperature=temperature, max_tokens=max_tokens,
+                         max_iters=max_iters, show_results=show_results),
         )
     ]
 

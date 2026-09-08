@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -294,7 +294,10 @@ def run_one(sample: Dict[str, Any], index: int, args: argparse.Namespace) -> Dic
         system_prompt=system_prompt,
         llm=client,
         is_main_agent=True,
-        tools=build_subagent_tools(),
+        tools=build_subagent_tools(temperature=args.temperature,
+                                  max_tokens=args.sub_max_tokens,
+                                  max_iters=args.sub_max_iters,
+                                  show_results=args.show_sub_results),
         max_iters=max(len(sample["evidence_docs"]) + 3, 4),
         temperature=args.temperature,
         max_tokens=args.final_max_tokens,
