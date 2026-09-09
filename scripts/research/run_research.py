@@ -40,8 +40,8 @@ def parse_args():
     parser.add_argument("--enable-thinking", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--release-kv", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--engine", choices=("fast", "legacy"), default="fast")
-    parser.add_argument("--max-followups", type=int, default=2)
-    parser.add_argument("--sub-tool-rounds", type=int, default=None, help="Optional sub tool-round cap; default unlimited, 0 disables sub tools")
+    parser.add_argument("--max-followups", type=int, default=5, help="Targeted single-document reinspections after every document is analyzed (fast engine)")
+    parser.add_argument("--sub-tool-rounds", type=int, default=2, help="Sub tool-round cap per task; default 2, 0 uses supplied passages only")
     parser.add_argument("--packet-chars", type=positive, default=32000)
     parser.add_argument("--max-requests", type=positive, default=60)
     parser.add_argument("--max-main-turns", type=positive, default=24)
@@ -81,7 +81,8 @@ def run(args):
             if args.engine == "fast":
                 engine = FastResearchEngine(client, store, max_followups=args.max_followups,
                                             packet_chars=args.packet_chars, max_tokens=args.max_tokens,
-                                            temperature=args.temperature, max_sub_tool_rounds=args.sub_tool_rounds)
+                                            temperature=args.temperature, max_sub_tool_rounds=args.sub_tool_rounds,
+                                            max_main_turns=args.max_main_turns, max_requests=args.max_requests)
             else:
                 engine = ResearchEngine(client, store, max_requests=args.max_requests,
                                         max_main_turns=args.max_main_turns, max_worker_turns=args.max_worker_turns,
