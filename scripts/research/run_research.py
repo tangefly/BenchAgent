@@ -40,6 +40,8 @@ def parse_args():
     parser.add_argument("--enable-thinking", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--release-kv", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--engine", choices=("fast", "legacy"), default="fast")
+    parser.add_argument("--log-level", choices=("basic", "full"), default="basic",
+                        help="Console logs: basic progress/results (default), or full model/tool details; JSONL events remain complete")
     parser.add_argument("--max-followups", type=int, default=5, help="Targeted single-document reinspections after every document is analyzed (fast engine)")
     parser.add_argument("--sub-tool-rounds", type=int, default=2, help="Sub tool-round cap per task; default 2, 0 uses supplied passages only")
     parser.add_argument("--packet-chars", type=positive, default=32000)
@@ -78,15 +80,18 @@ def run(args):
         try:
             # Both retrieval state and LLM session are fresh for every sample.
             store = SourceStore(sample_paths(sample, args.metadata))
+            print(f"[SAMPLE] index={index} query_id={sample['query_id']} documents={len(store.sources)}", flush=True)
             if args.engine == "fast":
                 engine = FastResearchEngine(client, store, max_followups=args.max_followups,
                                             packet_chars=args.packet_chars, max_tokens=args.max_tokens,
                                             temperature=args.temperature, max_sub_tool_rounds=args.sub_tool_rounds,
-                                            max_main_turns=args.max_main_turns, max_requests=args.max_requests)
+                                            max_main_turns=args.max_main_turns, max_requests=args.max_requests,
+                                            log_level=args.log_level)
             else:
                 engine = ResearchEngine(client, store, max_requests=args.max_requests,
                                         max_main_turns=args.max_main_turns, max_worker_turns=args.max_worker_turns,
-                                        max_tokens=args.max_tokens, temperature=args.temperature)
+                                        max_tokens=args.max_tokens, temperature=args.temperature,
+                                        log_level=args.log_level)
             result = engine.run(sample["query"])
             row = {"index": index, "query_id": sample["query_id"], **result,
                    "source_mode": "sample_evidence_docs", "prediction": result["answer"]}

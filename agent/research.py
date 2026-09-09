@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .utils import strip_think
+from .research_logging import ResearchLogger
 
 
 class SourceStore:
@@ -117,7 +118,9 @@ class BudgetExceeded(RuntimeError):
 
 class ResearchEngine:
     def __init__(self, client, store: SourceStore, *, max_requests=60,
-                 max_main_turns=24, max_worker_turns=8, max_tokens=4096, temperature=0.0):
+                 max_main_turns=24, max_worker_turns=8, max_tokens=4096, temperature=0.0,
+                 log_level="basic"):
+        self.log = ResearchLogger(log_level)
         self.client, self.store = client, store
         self.max_requests, self.max_main_turns = max_requests, max_main_turns
         self.max_worker_turns, self.max_tokens, self.temperature = max_worker_turns, max_tokens, temperature
@@ -146,7 +149,7 @@ class ResearchEngine:
                             "usage": dict(self.client.last_usage),
                             "reused_prompt_tokens": self.client.last_reused_tokens,
                             "response": response})
-        print(f"[research] request={self.requests}/{self.max_requests} role={role} trace={' -> '.join(self.trace)}", flush=True)
+        self.log.show("[MODEL REQUEST]", f"request={self.requests}/{self.max_requests} role={role} trace={' -> '.join(self.trace)}", detailed=True)
         return response
 
     def _loop(self, prompt, task, tools, dispatch, role, turns):
@@ -155,6 +158,8 @@ class ResearchEngine:
             response = self._chat(messages, tools, role)
             calls = response.get("tool_calls") or []
             content = strip_think(response.get("content") or "")
+            if content:
+                self.log.show(f"[{role.upper()} OUTPUT]", content, detailed=True)
             if not calls:
                 if role != "main":
                     return content
@@ -164,6 +169,7 @@ class ResearchEngine:
             messages.append({"role": "assistant", "content": content or None, "tool_calls": calls})
             for index, call in enumerate(calls):
                 name = call.get("function", {}).get("name", "")
+                self.log.show(f"[{role.upper()} TOOL CALL]", call, detailed=True)
                 try:
                     if index:
                         result = {"error": "Not executed: only one tool per turn. Reconsider after the first result."}
@@ -177,6 +183,9 @@ class ResearchEngine:
                 except Exception as exc:
                     result = {"error": f"{type(exc).__name__}: {exc}"}
                 self.events.append({"event": "tool", "role": role, "name": name, "result": result})
+                self.log.show(f"[{role.upper()} TOOL RESULT]", result, detailed=True)
+                if isinstance(result, dict) and "error" in result:
+                    self.log.show("[TOOL ERROR]", result)
                 messages.append({"role": "tool", "tool_call_id": call["id"], "name": name,
                                  "content": json.dumps(result, ensure_ascii=False)})
             if self.result is not None:
@@ -224,6 +233,7 @@ class ResearchEngine:
         return evidence
 
     def _worker(self, task, *, review=False):
+        self.log.show("[MAIN -> REVIEWER]" if review else "[MAIN -> SUB]", task)
         read_windows = []
         before = set(self.evidence)
         self.trace.append("sub")
@@ -235,6 +245,7 @@ class ResearchEngine:
                                 "reviewer" if review else "researcher", self.max_worker_turns)
         finally:
             self.trace.append("main")
+        self.log.show("[REVIEWER RESULT]" if review else "[SUB OUTPUT]", report)
         return {"report": report, "new_evidence_ids": sorted(set(self.evidence) - before),
                 "read_windows": read_windows}
 
@@ -337,6 +348,7 @@ class ResearchEngine:
         if self.result is None:
             self.result = {"status": "insufficient", "answer": "", "synthesis": "Research budget exhausted before a verified answer.",
                            "evidence_ids": [], "gaps": ["Unfinished investigation; inspect evidence and events."]}
+        self.log.show("[FINAL MAIN OUTPUT]", self.result)
         return self.result | {"query": query, "requirements": self.requirements,
                               "evidence": list(self.evidence.values()), "sources": self.store.catalog(),
                               "review": self.review, "trace": self.trace, "requests": self.requests,

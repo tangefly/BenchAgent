@@ -20,6 +20,15 @@
 
 ## 运行
 
+`--log-level basic` 为默认值，控制台只保留样本进度、任务分派、sub 提取的事实与缺口、错误和最终答案。
+`--log-level full` 额外显示每次模型请求、main 阶段分析、完整工具参数/结果、sub 原始输出及完整处理结果。
+两种模式均保留完整 JSONL 事件记录，不改变模型请求、证据提取或评分。fast 和 legacy 引擎均支持此参数。
+
+```bash
+python3 scripts/research/run_research.py --index 10 --log-level basic
+python3 scripts/research/run_research.py --index 10 --log-level full
+```
+
 ```bash
 # 默认 metadata: /home/tanger/workspace/datasets/browsecomp-plus-100/metadata.json
 python3 scripts/research/run_research.py --index 0

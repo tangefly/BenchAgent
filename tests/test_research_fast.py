@@ -1,5 +1,7 @@
 import json
 import unittest
+import io
+from contextlib import redirect_stdout
 
 from agent.research import SourceStore
 from agent.research_fast import FastResearchEngine, parse_object
@@ -7,6 +9,42 @@ from test_research import FakeClient, call, reply
 
 
 class FastResearchTests(unittest.TestCase):
+    def test_log_levels_filter_console_without_changing_research(self):
+        runs = {}
+        for level in ('basic', 'full'):
+            client = FakeClient([
+                call('research', query='Founder', source_ids=['S1']),
+                call('search_documents', queries=['Ada']),
+                reply({'findings': [self.report()['findings'][0]], 'gaps': []}),
+                call('research', query='Location', source_ids=['S2']),
+                reply({'findings': [self.report()['findings'][1]], 'gaps': []}),
+                reply(self.final()),
+            ])
+            output = io.StringIO()
+            with redirect_stdout(output):
+                result = FastResearchEngine(client, self.store, log_level=level).run('Which lab?')
+            runs[level] = (result, client.calls, output.getvalue())
+        basic, full = runs['basic'][2], runs['full'][2]
+        for marker in ('[MAIN TOOL CALL]', '[SUB TOOL CALL]', '[SUB TOOL RESULT]', '[SUB RAW OUTPUT]', '[MAIN ANALYSIS]'):
+            self.assertNotIn(marker, basic)
+            self.assertIn(marker, full)
+        for output in (basic, full):
+            self.assertIn('[main -> sub #1]', output)
+            self.assertIn('[SUB OUTPUT]', output)
+            self.assertIn('[FINAL MAIN OUTPUT]', output)
+            self.assertIn('Ada founded North Lab.', output)
+        self.assertNotIn('"passages"', basic)
+        self.assertIn('"passages"', full)
+        self.assertEqual(runs['basic'][1], runs['full'][1])
+        for key in ('answer', 'evidence', 'reports', 'trace', 'requests'):
+            self.assertEqual(runs['basic'][0][key], runs['full'][0][key])
+        for result, _, _ in runs.values():
+            self.assertTrue(any(e['event'] == 'tool' and e.get('role') == 'researcher' for e in result['events']))
+
+    def test_invalid_log_level_rejected(self):
+        with self.assertRaises(ValueError):
+            FastResearchEngine(FakeClient([]), self.store, log_level='silent')
+
     def setUp(self):
         self.store = SourceStore()
         self.store.add('a', 'Ada founded North Lab in 2010.')
