@@ -41,6 +41,7 @@ def parse_args():
     parser.add_argument("--release-kv", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--engine", choices=("fast", "legacy"), default="fast")
     parser.add_argument("--max-followups", type=int, default=2)
+    parser.add_argument("--sub-tool-rounds", type=int, default=None, help="Optional sub tool-round cap; default unlimited, 0 disables sub tools")
     parser.add_argument("--packet-chars", type=positive, default=32000)
     parser.add_argument("--max-requests", type=positive, default=60)
     parser.add_argument("--max-main-turns", type=positive, default=24)
@@ -80,7 +81,7 @@ def run(args):
             if args.engine == "fast":
                 engine = FastResearchEngine(client, store, max_followups=args.max_followups,
                                             packet_chars=args.packet_chars, max_tokens=args.max_tokens,
-                                            temperature=args.temperature)
+                                            temperature=args.temperature, max_sub_tool_rounds=args.sub_tool_rounds)
             else:
                 engine = ResearchEngine(client, store, max_requests=args.max_requests,
                                         max_main_turns=args.max_main_turns, max_worker_turns=args.max_worker_turns,

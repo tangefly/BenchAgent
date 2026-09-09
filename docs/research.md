@@ -12,11 +12,11 @@
 
 1. main 调用一次 `research`，首次自动覆盖当前样本所有文档。
 2. 程序准备阅读材料：短文档完整提供，长文档提供标题及检索命中的片段。没有模型侧逐页读取和逐条录入操作。
-3. sub 一次返回跨文档的一组事实及原文引用；额外 JSON 字段会被忽略。引用按空白归一化后检查是否来自提供的片段，校验失败则直接把源材料交给 main 判断，不让 sub 反复修复。
+3. sub 可自主调用 `search_documents` 搜索当前样本文档、调用 `read_passages` 补读上下文；材料足够时直接返回跨文档的一组事实及原文引用；额外 JSON 字段会被忽略。引用按空白归一化后检查是否来自提供的片段，校验失败则直接把源材料交给 main 判断，不让 sub 反复修复。
 4. main 综合并输出答案。需要更多信息时，在 JSON 中返回 `follow_up`（目标问题、关键词、来源 ID），程序再执行一次 sub 提取。重复的阅读材料不会再调用 sub。
 5. 默认最多两次补查。取消强制独立 reviewer 和“所有条件全部登记才能回答”的门槛；main 必须说明跨文档关系、反例和未解决条件。保留有证据支持的候选答案，标记 `partial`，不因某个条件尚不明确就清空预测。
 
-正常无补查路径为 3 次模型请求：`main -> sub -> main`；一次补查为 5 次，两次为 7 次。异常格式/未正常收尾时可能增加一次终结请求，默认上限 8 次，不再是 60 次。字符预算限制输入规模，但不等于 tokenizer 的精确 token 数。
+不需要 sub 工具和 main 补查时，仍为 3 次模型请求：`main -> sub -> main`。sub 自主决定搜索/阅读的查询数量、工具调用数量及何时收尾，默认没有 sub 工具轮数或总模型请求上限。sub 内部搜索/阅读不会改变 trace，返回 main 时才追加 main。字符预算限制输入规模，但不等于 tokenizer 的精确 token 数。
 
 ## 运行
 
@@ -31,6 +31,11 @@ python3 scripts/research/run_research.py --all
 # 禁止补查，只做一轮跨文档提取和综合
 python3 scripts/research/run_research.py --index 0 --max-followups 0
 
+# 默认 sub 自主决定搜索数量与轮数；只有显式指定时才限制轮数
+python3 scripts/research/run_research.py --index 0
+# 可选：恢复不调用 sub 工具的提取模式
+python3 scripts/research/run_research.py --index 0 --sub-tool-rounds 0
+
 # 增加阅读材料的字符预算
 python3 scripts/research/run_research.py --index 0 --packet-chars 48000
 
@@ -42,7 +47,7 @@ python3 scripts/research/run_research.py --index 0 --no-agent-mode \
 python3 scripts/research/run_research.py --index 0 --engine legacy
 ```
 
-精简引擎使用 `--max-followups`（默认 2）、`--packet-chars`（默认 32000）、`--max-tokens`（默认 4096）。`--max-requests`、`--max-main-turns`、`--max-worker-turns` 只影响 legacy 引擎。
+精简引擎使用 `--max-followups`（默认 2）、`--sub-tool-rounds`（默认不限制）、`--packet-chars`（默认 32000）、`--max-tokens`（默认 4096）。`--max-requests`、`--max-main-turns`、`--max-worker-turns` 只影响 legacy 引擎。
 
 `--release-kv` 在每条样本结束时释放其服务端 KV。实际缓存复用量由 LMInfer 实现决定，以输出中的统计为准。
 
@@ -61,3 +66,18 @@ python3 scripts/research/run_research.py --index 0 --engine legacy
 ```bash
 python3 -m unittest discover -s tests -v
 ```
+
+## sub 原生工具
+
+- `search_documents(queries, source_ids?, limit?)`：自主决定一次提交的查询数量；可限制来源 ID。返回原文片段、来源 ID 和字符范围，sub 可直接引用，无须再调用读取工具。
+- `read_passages(passages)`：自主决定一次读取的指定来源片段数量，每项包含 `source_id`、可选 `start` 和 `length`。只能读取当前样本已有来源，不接受文件路径。
+
+同一回复中的所有 sub 工具调用都会执行，批量数组也不会截取前几项。`limit` 由 sub 决定每个查询返回多少个命中；默认 3，但没有硬上限。读取长度按请求执行，工具总结果不再按 12000 字符截断。完全相同的调用使用缓存返回，不强制 sub 收尾。只有用户显式指定 `--sub-tool-rounds` 时才设工具轮数上限。工具得到的新片段进入引用校验与 coverage 记录。
+
+例如模型可生成原生 tool call 参数：
+
+```json
+{"queries": ["graduation June 2003", "Sana'a capital"], "source_ids": ["S2", "S6"], "limit": 3}
+```
+
+事件日志中 `role=researcher` 且 `event=tool` 的记录包含工具名、参数、结果和 trace。控制台会显示 `[research-fast tool] sub search_documents passages=...`。

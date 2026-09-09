@@ -40,21 +40,29 @@ class SourceStore:
         return [{k: v for k, v in s.items() if k != "text"} | {"characters": len(s["text"])}
                 for s in self.sources.values()]
 
-    def search(self, query: str, limit: int = 5):
+    def search(self, query: str, limit: int = 5, source_ids=None):
         terms = list(dict.fromkeys(re.findall(r"\w+", query)))[:40]
         if not terms:
             raise ValueError("query needs searchable words")
         expression = " OR ".join('"' + term + '"' for term in terms)
+        scope_sql = ""
+        params = [expression]
+        if source_ids is not None:
+            if not isinstance(source_ids, list) or not source_ids or any(not isinstance(s, str) or s not in self.sources for s in source_ids):
+                raise ValueError("source_ids must identify sources in this sample")
+            scope_sql = " AND source IN (" + ",".join("?" for _ in source_ids) + ")"
+            params.extend(source_ids)
+        params.append(max(1, int(limit)))
         rows = self.db.execute(
-            "SELECT source, start, body FROM chunks WHERE chunks MATCH ? ORDER BY bm25(chunks) LIMIT ?",
-            (expression, max(1, min(int(limit), 10))),
+            "SELECT source, start, body FROM chunks WHERE chunks MATCH ?" + scope_sql + " ORDER BY bm25(chunks) LIMIT ?",
+            params,
         ).fetchall()
         return [{"source_id": sid, "start": int(start), "end": int(start) + len(body),
                  "text": body, "location": self.sources[sid]["location"]} for sid, start, body in rows]
 
     def read(self, source_id: str, start: int = 0, length: int = 6000):
         text = self.sources[source_id]["text"]
-        start, length = int(start), max(1, min(int(length), 8000))
+        start, length = int(start), max(1, int(length))
         if start < 0 or start > len(text):
             raise ValueError("start outside source")
         end = min(len(text), start + length)
