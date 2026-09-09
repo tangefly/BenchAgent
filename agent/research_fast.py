@@ -209,6 +209,7 @@ class FastResearchEngine:
                 for index, call in enumerate(calls):
                     fn = call.get("function", {})
                     args = parse_object(fn.get("arguments")) or {}
+                    print("[SUB TOOL CALL] " . json.dumps({"name": fn.get("name", ""), "arguments": args, "task_id": getattr(self, "active_task_id", None), "document_id": self.active_source}, ensure_ascii=False), flush=True)
                     key = json.dumps([fn.get("name"), args], sort_keys=True, ensure_ascii=False)
                     try:
                         if key in cached_calls:
@@ -221,7 +222,7 @@ class FastResearchEngine:
                         result = {"error": str(exc)}
                     self.events.append({"event": "tool", "role": "researcher", "trace": list(self.trace),
                                         "name": fn.get("name"), "arguments": args, "result": result})
-                    print(f"[research-fast tool] sub {fn.get('name')} passages={len(result.get('passages', []))}", flush=True)
+                    print("[SUB TOOL RESULT] " . json.dumps({"name": fn.get("name", ""), "result": result, "task_id": getattr(self, "active_task_id", None), "document_id": self.active_source}, ensure_ascii=False), flush=True)
                     messages.append({"role": "tool", "tool_call_id": call["id"], "name": fn.get("name", ""),
                                      "content": json.dumps(result, ensure_ascii=False)})
                 step += 1
@@ -282,6 +283,8 @@ class FastResearchEngine:
         self.events.append({"event": "delegation", "task_id": task_id, "query": focus,
                             "source_ids": [p["source_id"] for p in packet]})
         print(f"[main -> sub #{task_id}] document={ids[0]} {focus}", flush=True)
+        print("[MAIN TOOL CALL] " . json.dumps({"name": "research", "arguments": {"query": focus, "source_ids": ids}, "task_id": task_id}, ensure_ascii=False), flush=True)
+        self.active_task_id = task_id
         self.active_source = ids[0]
         try:
             result = self._extract(packet, focus)
@@ -293,7 +296,7 @@ class FastResearchEngine:
         self.seen_packets.add(key)
         result["task_id"], result["task"] = task_id, focus
         self.events.append({"event": "sub_result", "task_id": task_id, "result": result})
-        print(f"[sub #{task_id} -> main] " + json.dumps(result, ensure_ascii=False), flush=True)
+        print("[SUB OUTPUT] " . json.dumps({"task_id": task_id, "document_id": ids[0], "output": result}, ensure_ascii=False), flush=True)
         return result
 
     def run(self, query):
@@ -336,6 +339,7 @@ class FastResearchEngine:
                     continue
                 messages.append({"role": "assistant", "content": content or None, "tool_calls": calls})
                 for i, call in enumerate(calls):
+                    print("[MAIN TOOL CALL] " . json.dumps({"name": call.get("function", {}).get("name", ""), "arguments": parse_object(call.get("function", {}).get("arguments")) or {}, "call_index": i}, ensure_ascii=False), flush=True)
                     fn = call.get("function", {})
                     if i or not can_research:
                         result = {"notice": "Not executed. Analyze the previous result before another delegation; if research budget ended, finalize."}
@@ -358,6 +362,7 @@ class FastResearchEngine:
             exhausted = str(exc)
         if answer is None:
             answer = {"prediction": "", "gaps": [exhausted], "citations": [], "support": "Investigation unfinished; inspect subtask reports and events."}
+        print("[FINAL MAIN OUTPUT] " + json.dumps(answer, ensure_ascii=False), flush=True)
         prediction = answer.get("prediction") if isinstance(answer.get("prediction"), str) else ""
         citations = answer.get("citations", [])
         citations = citations if isinstance(citations, list) else []
