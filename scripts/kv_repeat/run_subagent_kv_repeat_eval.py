@@ -1,19 +1,20 @@
 from __future__ import annotations
 
 import argparse
-import difflib
 import hashlib
 import json
+import re
 import statistics
 import sys
 import time
 from collections import defaultdict
+from functools import lru_cache
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -21,9 +22,12 @@ from agent.agent import parse_json_arguments
 from agent.llm import LLMClient
 from agent.tools import build_subagent_tools
 from agent.utils import strip_think
+from scripts.browsecomp.run_browsecomp import score_prediction
+
+METRIC_NAMES = ("rouge1", "rouge2", "rougeL", "token_f1", "exact_match")
 
 
-DEFAULT_DATASET = ROOT / "data" / "subagent_kv_repeat_questions.jsonl"
+DEFAULT_DATASET = Path("/home/tanger/workspace/datasets/subagent_kv_repeat_docs/questions.jsonl")
 
 
 def load_jsonl(path: Path) -> List[Dict[str, Any]]:
@@ -66,35 +70,6 @@ def extract_marked_output(text: str) -> str:
     return normalized[start : stop + len(end)].strip()
 
 
-def levenshtein_distance(a: str, b: str) -> int:
-    if a == b:
-        return 0
-    if len(a) < len(b):
-        a, b = b, a
-    previous = list(range(len(b) + 1))
-    for i, ca in enumerate(a, start=1):
-        current = [i]
-        for j, cb in enumerate(b, start=1):
-            insert = current[j - 1] + 1
-            delete = previous[j] + 1
-            replace = previous[j - 1] + (ca != cb)
-            current.append(min(insert, delete, replace))
-        previous = current
-    return previous[-1]
-
-
-def positional_line_accuracy(expected: str, actual: str) -> float:
-    expected_lines = expected.splitlines()
-    actual_lines = actual.splitlines()
-    if not expected_lines:
-        return 1.0 if not actual_lines else 0.0
-    matched = sum(
-        1 for idx, line in enumerate(expected_lines)
-        if idx < len(actual_lines) and actual_lines[idx] == line
-    )
-    return matched / len(expected_lines)
-
-
 def chinese_char_count(text: str) -> int:
     return sum(1 for char in text if "\u4e00" <= char <= "\u9fff")
 
@@ -106,22 +81,43 @@ def numbered_body_lines(text: str) -> List[str]:
 def compare_texts(expected_raw: str, actual_raw: str) -> Dict[str, Any]:
     expected = extract_marked_output(expected_raw)
     actual = extract_marked_output(actual_raw)
-    distance = levenshtein_distance(expected, actual)
-    denom = max(len(expected), 1)
-    matcher = difflib.SequenceMatcher(a=expected, b=actual, autojunk=False)
-    return {
-        "exact_match": expected == actual,
-        "expected_chars": len(expected),
-        "actual_chars": len(actual),
-        "levenshtein_distance": distance,
-        "char_accuracy": max(0.0, 1.0 - distance / denom),
-        "sequence_ratio": matcher.ratio(),
-        "line_accuracy": positional_line_accuracy(expected, actual),
-        "expected_sha256": sha256_text(expected),
-        "actual_sha256": sha256_text(actual),
-        "has_begin_marker": "BEGIN_SUBAGENT_OUTPUT" in actual,
-        "has_end_marker": "END_SUBAGENT_OUTPUT" in actual,
-    }
+    return score_prediction(actual, expected)
+
+
+def trim_incomplete_sentence(text: str, finish_reason: Optional[str]) -> tuple[str, Dict[str, Any]]:
+    """Conservative punctuation heuristic for the dataset's one-fact-per-line output.
+
+    Only length-stopped generations are trimmed. For multiline notes, retain the
+    prefix ending at the last line with terminal punctuation. This avoids treating
+    a decimal or an abbreviation inside a truncated final line as a sentence end.
+    For a single-line response, use the last punctuation followed by whitespace.
+    """
+    info = {"applied": False, "removed_chars": 0, "reason": "not_length_stopped"}
+    if finish_reason != "length":
+        return text, info
+    terminal = r"[.!?。！？][\"'”’）)]*"
+    if re.search(terminal + r"\s*$", text):
+        info["reason"] = "ends_with_sentence_punctuation"
+        return text, info
+    if "\n" in text:
+        boundary, offset = 0, 0
+        for line in text.splitlines(keepends=True):
+            offset += len(line)
+            if re.search(terminal + r"\s*$", line):
+                boundary = offset
+    else:
+        matches = list(re.finditer(terminal + r"(?=\s|$)", text))
+        boundary = matches[-1].end() if matches else 0
+    retained = text[:boundary].rstrip()
+    info.update(applied=retained != text, removed_chars=len(text)-len(retained),
+                reason="removed_incomplete_tail" if retained else "no_complete_sentence")
+    return retained, info
+
+
+@lru_cache(maxsize=2)
+def output_tokenizer(path: str):
+    from transformers import AutoTokenizer
+    return AutoTokenizer.from_pretrained(path, local_files_only=True, trust_remote_code=True)
 
 
 def usage_value(usage: Dict[str, Any], key: str) -> Optional[int]:
@@ -136,6 +132,17 @@ def main_system_prompt() -> str:
         "After the SubAgent returns, output the SubAgent result verbatim. "
         "Do not summarize, correct, reformat, translate, or add any text."
     )
+
+
+STRICT_REPEAT_INSTRUCTION = (
+    "Copy the entire content of the preceding call_subagent tool result, from its first "
+    "character to its last character, exactly once. This is a transcription task. "
+    "The tool result is a fixed excerpt and may end in the middle of a word or sentence. "
+    "Stop at that exact point: do not finish the word or sentence or continue the document. "
+    "Include every line in the original order, including repeated facts. Do not remove "
+    "duplicates, omit the beginning or middle, correct facts, or summarize. "
+    "Output only the copied content, without an introduction, quotation marks, or code fences."
+)
 
 
 def build_main_task(subagent_prompt: str) -> str:
@@ -153,19 +160,33 @@ def make_first_message(task: str) -> Dict[str, Any]:
     return {"role": "user", "content": f"【系统设定】\n{main_system_prompt()}\n\n【任务】\n{task}"}
 
 
-def call_subagent_tool(call: Dict[str, Any], client: LLMClient, trace: List[str]) -> str:
+def call_subagent_tool(call: Dict[str, Any], client: LLMClient, trace: List[str],
+                       max_tokens: int, temperature: float, expected_task: str,
+                       document_text: Optional[str] = None) -> str:
     fn = call.get("function") or {}
     arguments = parse_json_arguments(fn.get("arguments") or "{}")
     task = arguments.get("task")
     if not isinstance(task, str) or not task.strip():
         raise RuntimeError(f"Invalid call_subagent arguments: {json.dumps(arguments, ensure_ascii=False)}")
 
-    tool = build_subagent_tools()[0]
+    if fn.get("name") != "call_subagent":
+        raise RuntimeError("Expected call_subagent")
+    # Bind execution to the dataset task: model paraphrases cannot alter the experiment.
+    task = expected_task
     sub_trace = list(trace)
     sub_trace.append("sub")
-    result = tool.call({"task": task, "client": client, "trace": sub_trace})
+    if document_text is not None:
+        # Private source input is never appended to main's messages.
+        task += "\n\n<source_document>\n" + document_text + "\n</source_document>"
+    # A single generation avoids tool calls and extra iterations consuming budget.
+    result = client.chat(
+        [{"role": "user", "content": task}],
+        trace=sub_trace, temperature=temperature, max_tokens=max_tokens,
+    )
     trace.append("sub")
-    return result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, default=str)
+    if result.get("tool_calls"):
+        raise RuntimeError("SubAgent unexpectedly returned tool calls")
+    return strip_think(result.get("content") or "")
 
 
 def selected_rows(rows: List[Dict[str, Any]], args: argparse.Namespace) -> List[tuple[int, Dict[str, Any]]]:
@@ -212,6 +233,16 @@ def chat_timed(
 
 
 def run_one(row: Dict[str, Any], dataset_index: int, args: argparse.Namespace) -> Dict[str, Any]:
+    document_text = None
+    if row.get("document_path"):
+        dataset_dir = args.dataset.resolve().parent
+        document_path = (dataset_dir / row["document_path"]).resolve()
+        if not document_path.is_relative_to(dataset_dir):
+            raise ValueError("Document must be inside the copied dataset")
+        document_bytes = document_path.read_bytes()
+        if hashlib.sha256(document_bytes).hexdigest() != row["document_sha256"]:
+            raise ValueError(f"Document checksum mismatch: {document_path}")
+        document_text = document_bytes.decode("utf-8")
     client = LLMClient(
         base_url=args.base_url,
         api_key=args.api_key,
@@ -247,7 +278,24 @@ def run_one(row: Dict[str, Any], dataset_index: int, args: argparse.Namespace) -
         )
 
         sub_start = time.perf_counter()
-        sub_output = call_subagent_tool(tool_calls[0], client, trace)
+        sub_max_tokens = args.sub_max_tokens if args.sub_max_tokens is not None else row.get("target_repeat_tokens")
+        if not isinstance(sub_max_tokens, int) or sub_max_tokens <= 0:
+            raise ValueError("A positive sub token budget is required")
+        sub_output = call_subagent_tool(
+            tool_calls[0], client, trace, sub_max_tokens,
+            args.sub_temperature, row["subagent_prompt"], document_text,
+        )
+        sub_finish_reason = client.last_finish_reason
+        sub_output_raw = sub_output
+        trim_info = {"applied": False, "removed_chars": 0, "reason": "disabled"}
+        if getattr(args, "trim_incomplete_sentence", False):
+            sub_output, trim_info = trim_incomplete_sentence(sub_output, sub_finish_reason)
+            if not sub_output:
+                raise ValueError("Sub output contains no complete sentence; increase sub budget")
+        returned_tokens = None
+        if getattr(args, "tokenizer_path", None):
+            returned_tokens = len(output_tokenizer(str(args.tokenizer_path)).encode(
+                sub_output, add_special_tokens=False))
         sub_elapsed_ms = (time.perf_counter() - sub_start) * 1000.0
         sub_usage = dict(client.last_usage)
         actual_subagent_output_tokens = usage_value(sub_usage, "completion_tokens")
@@ -257,21 +305,51 @@ def run_one(row: Dict[str, Any], dataset_index: int, args: argparse.Namespace) -
                 "role": "tool",
                 "tool_call_id": tool_calls[0]["id"],
                 "name": "call_subagent",
-                "content": sub_output,
+                "content": (
+                    "BEGIN_KV_EXCERPT\n" + sub_output + "\nEND_KV_EXCERPT"
+                    if getattr(args, "repeat_instruction", "baseline") == "bounded"
+                    else sub_output
+                ),
             }
         )
 
+        if getattr(args, "repeat_instruction", "baseline") == "bounded":
+            messages.append({"role": "user", "content": (
+                "Transcribe only the text between BEGIN_KV_EXCERPT and END_KV_EXCERPT "
+                "in the tool result above. Do not output the markers. Copy every character "
+                "and every line, including duplicates and the final unfinished word. "
+                "Do not complete the final fragment. Do not call any tool. "
+                "Do not summarize, correct, explain, or add anything."
+            )})
+        if getattr(args, "repeat_instruction", "baseline") == "strict":
+            messages.append({"role": "user", "content": STRICT_REPEAT_INSTRUCTION})
         trace.append("main")
         main_final, main_final_ms, main_final_usage, main_final_reused = chat_timed(
             client,
             messages,
             trace=trace,
-            tools=tools_json,
             temperature=args.temperature,
             max_tokens=args.max_tokens,
         )
         repeated_output = strip_think(main_final.get("content") or "")
         metrics = compare_texts(sub_output, repeated_output)
+        task_check = None
+        if row.get("content_type") == "deterministic_records":
+            lines = sub_output.splitlines()
+            complete = list(lines)
+            partial_tail = None
+            if complete and not re.fullmatch(r"R[0-9]{3}\|value=[0-9]{3}", complete[-1]):
+                partial_tail = complete.pop()
+            correct = sum(
+                line == f"R{i:03d}|value={(i * 37 + row['seed']) % 1000:03d}"
+                for i, line in enumerate(complete, 1)
+            )
+            task_check = {
+                "complete_lines": len(complete),
+                "correct_lines": correct,
+                "complete_line_accuracy": correct / len(complete) if complete else None,
+                "partial_tail": partial_tail,
+            }
 
         sub_marked_output = extract_marked_output(sub_output)
         sub_body_lines = numbered_body_lines(sub_output)
@@ -288,9 +366,26 @@ def run_one(row: Dict[str, Any], dataset_index: int, args: argparse.Namespace) -
             "min_output_chars": min_output_chars,
             "content_type": row.get("content_type"),
             "topic": row.get("topic"),
+            "document_id": row.get("document_id"),
+            "document_path": row.get("document_path"),
+            "document_sha256": row.get("document_sha256"),
             "session_id": client.session_id,
+            "sub_max_tokens": sub_max_tokens,
+            "repeat_instruction": getattr(args, "repeat_instruction", "baseline"),
+            "sub_temperature": args.sub_temperature,
+            "requested_subagent_task": parse_json_arguments(
+                tool_calls[0]["function"].get("arguments") or "{}"
+            ).get("task"),
+            "executed_subagent_task": row["subagent_prompt"],
+            "sub_finish_reason": sub_finish_reason,
+            "sentence_trimming": dict(trim_info, generated_chars=len(sub_output_raw),
+                                      returned_chars=len(sub_output)),
+            "main_finish_reason": client.last_finish_reason,
+            "sub_budget_reached": actual_subagent_output_tokens == sub_max_tokens,
             "trace": trace,
             "metrics": metrics,
+            "raw_exact_match": sub_output == repeated_output,
+            "sub_task_check": task_check,
             "timing_ms": {
                 "main_first": main_first_ms,
                 "subagent": sub_elapsed_ms,
@@ -303,6 +398,7 @@ def run_one(row: Dict[str, Any], dataset_index: int, args: argparse.Namespace) -
             },
             "actual_tokens": {
                 "subagent_output_tokens": actual_subagent_output_tokens,
+                "subagent_returned_text_tokens": returned_tokens,
                 "target_repeat_tokens": row.get("target_repeat_tokens"),
                 "main_repeat_output_tokens": usage_value(main_final_usage, "completion_tokens"),
             },
@@ -331,7 +427,30 @@ def run_one(row: Dict[str, Any], dataset_index: int, args: argparse.Namespace) -
         }
         if args.include_text:
             result["sub_output"] = sub_output
+            result["sub_output_raw"] = sub_output_raw
             result["main_repeated_output"] = repeated_output
+        if getattr(args, "text_control", False):
+            # Same sub output and same main messages, without an agent session or grafts.
+            control = LLMClient(base_url=args.base_url, api_key=args.api_key,
+                                model=args.model, timeout=args.timeout,
+                                agent_mode=False, enable_thinking=args.enable_thinking)
+            try:
+                plain, latency, usage, reused = chat_timed(
+                    control, messages, trace=[], temperature=args.temperature,
+                    max_tokens=args.max_tokens,
+                )
+                text = strip_think(plain.get("content") or "")
+                result["text_control"] = {
+                    "metrics": compare_texts(sub_output, text),
+                    "raw_exact_match": sub_output == text,
+                    "finish_reason": control.last_finish_reason,
+                    "usage": usage, "reused_prompt_tokens": reused,
+                    "latency_ms": latency,
+                }
+                if args.include_text:
+                    result["text_control"]["output"] = text
+            finally:
+                control.session.close()
         return result
     finally:
         if args.release_kv and client.session_id:
@@ -350,10 +469,27 @@ def summarize(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     def bucket_summary(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         return {
             "count": len(rows),
-            "exact_match_rate": mean(1.0 if row["metrics"]["exact_match"] else 0.0 for row in rows),
-            "char_accuracy": mean(row["metrics"]["char_accuracy"] for row in rows),
-            "sequence_ratio": mean(row["metrics"]["sequence_ratio"] for row in rows),
-            "line_accuracy": mean(row["metrics"]["line_accuracy"] for row in rows),
+            "text_control_metrics": {
+                name: mean(row["text_control"]["metrics"][name] for row in rows
+                           if "text_control" in row)
+                for name in METRIC_NAMES
+            },
+            "sub_budget_reached_rate": mean(float(row["sub_budget_reached"]) for row in rows),
+            "sub_returned_text_tokens": mean(
+                row["actual_tokens"].get("subagent_returned_text_tokens") for row in rows
+                if row["actual_tokens"].get("subagent_returned_text_tokens") is not None
+            ),
+            "sentence_trimmed_rate": mean(
+                float(row.get("sentence_trimming", {}).get("applied", False)) for row in rows
+            ),
+            "sub_output_tokens_min": min((row["actual_tokens"]["subagent_output_tokens"] for row in rows
+                                          if row["actual_tokens"]["subagent_output_tokens"] is not None), default=None),
+            "sub_output_tokens_max": max((row["actual_tokens"]["subagent_output_tokens"] for row in rows
+                                          if row["actual_tokens"]["subagent_output_tokens"] is not None), default=None),
+            "metrics": {
+                name: mean(row["metrics"][name] for row in rows)
+                for name in METRIC_NAMES
+            },
             "subagent_output_tokens": mean(
                 row["actual_tokens"]["subagent_output_tokens"]
                 for row in rows
@@ -419,9 +555,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--summary-output", type=Path, default=None)
     parser.add_argument("--base-url", default="http://localhost:8000/v1")
     parser.add_argument("--api-key", default="EMPTY")
-    parser.add_argument("--model", default="Qwen3-8B")
+    parser.add_argument("--model", default="exp-model")
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--max-tokens", type=int, default=4096)
+    parser.add_argument("--sub-max-tokens", type=int, default=None,
+                        help="Override sub budget; defaults to row target_repeat_tokens")
+    parser.add_argument("--sub-temperature", type=float, default=0.0)
+    parser.add_argument("--repeat-instruction", choices=("baseline", "strict", "bounded"), default="baseline",
+                        help="Strict adds a transcription reminder after the tool result")
+    parser.add_argument("--trim-incomplete-sentence", action=argparse.BooleanOptionalAction,
+                        default=True, help="Drop a length-truncated trailing sentence before main")
+    parser.add_argument("--tokenizer-path", type=Path, default=None,
+                        help="Local tokenizer for counting returned text tokens after trimming")
+    parser.add_argument("--text-control", action="store_true",
+                        help="Also repeat the same sub output without agent KV grafts")
     parser.add_argument("--timeout", type=float, default=600.0)
     parser.add_argument("--enable-thinking", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--release-kv", action=argparse.BooleanOptionalAction, default=True)
@@ -459,8 +606,10 @@ def run(args: argparse.Namespace) -> None:
             print(
                 "[result] "
                 f"exact={metrics['exact_match']} "
-                f"char_acc={metrics['char_accuracy']:.4f} "
-                f"line_acc={metrics['line_accuracy']:.4f} "
+                f"rouge1={metrics['rouge1']:.4f} "
+                f"rouge2={metrics['rouge2']:.4f} "
+                f"rougeL={metrics['rougeL']:.4f} "
+                f"token_f1={metrics['token_f1']:.4f} "
                 f"sub_tokens={result['actual_tokens']['subagent_output_tokens']} "
                 f"sub_chars={result['subagent_output_shape']['marked_chars']} "
                 f"sub_lines={result['subagent_output_shape']['numbered_body_lines']} "
@@ -493,6 +642,10 @@ def run(args: argparse.Namespace) -> None:
             "base_url": args.base_url,
             "temperature": args.temperature,
             "enable_thinking": args.enable_thinking,
+            "repeat_instruction": args.repeat_instruction,
+            "text_control": args.text_control,
+            "trim_incomplete_sentence": args.trim_incomplete_sentence,
+            "tokenizer_path": str(args.tokenizer_path) if args.tokenizer_path else None,
         }
     )
     summary_path.parent.mkdir(parents=True, exist_ok=True)

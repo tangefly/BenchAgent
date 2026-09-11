@@ -54,6 +54,7 @@ class LLMClient:
         # token 数(含拼接的子 agent 输出 KV); vLLM 等普通服务无该字段, 保持 0
         self.last_usage: Dict[str, int] = {}
         self.last_reused_tokens: int = 0
+        self.last_finish_reason: Optional[str] = None
 
     def _post(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """发一次请求并解析 JSON 响应。
@@ -127,6 +128,7 @@ class LLMClient:
         data = self._post(payload)
         # 记录本次响应的用量与 KV 复用统计(agent 模式观测用, 普通服务无字段时为 0)
         self.last_usage = data.get("usage") or {}
+        self.last_finish_reason = data["choices"][0].get("finish_reason")
         self.last_reused_tokens = data.get("reused_prompt_tokens") or 0
         if self.agent_mode and data.get("session_id"):
             self.session_id = data["session_id"]  # 首次请求后记住会话 id, 供后续请求复用
