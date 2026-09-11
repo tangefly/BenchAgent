@@ -41,6 +41,32 @@ class FastResearchTests(unittest.TestCase):
         for result, _, _ in runs.values():
             self.assertTrue(any(e['event'] == 'tool' and e.get('role') == 'researcher' for e in result['events']))
 
+    def test_malformed_passages_return_tool_error_and_research_continues(self):
+        invalid = ['[{"source_id":"S1"}, "location":"broken"}]',
+                   '{"source_id":"S1"}', None, {}, [], ["S1"], [None],
+                   [{"source_id": []}], [{"source_id": "S1", "start": "0"}]]
+        for passages in invalid:
+            with self.subTest(passages=passages):
+                client = FakeClient([
+                    call('read_passages', passages=passages),
+                    reply({'findings': [self.report()['findings'][0]], 'gaps': []})])
+                engine = FastResearchEngine(client, self.store, max_sub_tool_rounds=1)
+                engine.active_source = 'S1'
+                result = engine._extract(engine.packet('Ada', ['S1']), 'Founder')
+                self.assertEqual(len(result['findings']), 1)
+                event = next(e for e in engine.events if e['event'] == 'tool')
+                self.assertIn('error', event['result'])
+                self.assertEqual(engine.requests, 2)
+                self.assertEqual(engine.trace[-1], 'main')
+
+    def test_passage_validation_preserves_document_scope(self):
+        engine = FastResearchEngine(FakeClient([]), self.store)
+        engine.active_source = 'S1'
+        with self.assertRaisesRegex(ValueError, 'assigned document'):
+            engine._sub_tool('read_passages', {'passages': [{'source_id': 'S2'}]})
+        result = engine._sub_tool('read_passages', {'passages': [{'source_id': 'S1'}]})
+        self.assertEqual(result['passages'][0]['source_id'], 'S1')
+
     def test_invalid_log_level_rejected(self):
         with self.assertRaises(ValueError):
             FastResearchEngine(FakeClient([]), self.store, log_level='silent')

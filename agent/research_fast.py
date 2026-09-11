@@ -130,7 +130,20 @@ class FastResearchEngine:
 
     def _sub_tool(self, name, args):
         # Tool input is restricted to immutable snapshots of this sample, never paths.
+        if not isinstance(args, dict):
+            raise ValueError("tool arguments must be an object")
         args = dict(args)
+        # Validate model-generated structure before checking document scope or reading.
+        if name == "read_passages":
+            passages = args.get("passages")
+            if not isinstance(passages, list) or not passages:
+                raise ValueError("passages must be a nonempty array of objects, not a string")
+            for row in passages:
+                if not isinstance(row, dict) or not isinstance(row.get("source_id"), str):
+                    raise ValueError("each passage must be an object with a string source_id")
+                for field in ("start", "length"):
+                    if field in row and (type(row[field]) is not int or row[field] < (1 if field == "length" else 0)):
+                        raise ValueError(f"passage {field} must be a {'positive' if field == 'length' else 'nonnegative'} integer")
         if self.active_source is not None:
             if name == "search_documents":
                 if args.get("source_ids") not in (None, [self.active_source]):
