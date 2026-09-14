@@ -37,6 +37,10 @@ python3 scripts/research/run_research.py --index 0
 python3 scripts/research/run_research.py --index 0 --limit 5
 python3 scripts/research/run_research.py --all
 
+# --start 是 --index 的别名(与 run_browsecomp_evidence.py 同名), 从第 40 条开始
+python3 scripts/research/run_research.py --start 40 --limit 10
+python3 scripts/research/run_research.py --start 40 --all
+
 # 每篇文档各分析一次，全部完成后综合，不额外复查
 python3 scripts/research/run_research.py --index 0 --max-followups 0
 

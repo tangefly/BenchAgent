@@ -31,13 +31,15 @@ def parse_args():
     parser.add_argument("--metadata", type=Path,
                         default=Path("/home/tanger/workspace/datasets/browsecomp-plus-100/metadata.json"))
     # 选样本: 下标与 query_id 二选一(同时给会互相覆盖语义, 直接拒绝)
+    # --start 是 --index 的别名, 参数名与 run_browsecomp_evidence.py 保持一致
     select = parser.add_mutually_exclusive_group()
-    select.add_argument("--index", type=int, default=None, help="First sample index (default 0)")
+    select.add_argument("--index", "--start", dest="index", type=int, default=None,
+                        help="First sample index (default 0); --start is an alias")
     select.add_argument("--query-id", default=None,
                         help="Select the sample whose metadata query_id matches (exact string compare)")
     parser.add_argument("--limit", type=positive, default=1)
     parser.add_argument("--all", action="store_true",
-                        help="Run all samples starting at --index/--query-id")
+                        help="Run all samples starting at --index/--start/--query-id")
     parser.add_argument("--base-url", default="http://localhost:8000/v1")
     parser.add_argument("--api-key", default="EMPTY")
     parser.add_argument("--model", default="Qwen3-8B")
