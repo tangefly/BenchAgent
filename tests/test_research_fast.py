@@ -106,11 +106,12 @@ class FastResearchTests(unittest.TestCase):
         self.assertEqual(result['warnings'], [])
         self.assertEqual(len(result['coverage']), 2)
         self.assertEqual(engine.requests, 3)
-        self.assertTrue(all(c['trace'] == ['main', 'sub'] for c in client.calls))
+        # _extract 不再自己管理 trace: 直接调用时停在进入前的 main
+        self.assertTrue(all(c['trace'] == ['main'] for c in client.calls))
         self.assertIsNone(client.calls[-1]['tools'])
         self.assertEqual(client.calls[0]['tools'][0]['function']['name'], 'search_documents')
         self.assertEqual(client.calls[1]['messages'][-1]['role'], 'tool')
-        self.assertEqual(engine.trace, ['main', 'sub', 'main'])
+        self.assertEqual(engine.trace, ['main'])
 
     def test_sub_tools_scoped_without_text_truncation(self):
         engine = FastResearchEngine(FakeClient([]), self.store)
@@ -275,6 +276,58 @@ class FastResearchTests(unittest.TestCase):
         result = FastResearchEngine(client, store, max_followups=0).run('Which lab?')
         self.assertEqual(result['requests'], 3)
         self.assertEqual(result['status'], 'answered')
+
+    def test_batch_delegation_runs_one_sub_per_document_in_order(self):
+        client = FakeClient([call('research', query='Extract facts', source_ids=['S1', 'S2']),
+                             reply({'findings': [self.report()['findings'][0]], 'gaps': []}),
+                             reply({'findings': [self.report()['findings'][1]], 'gaps': []}),
+                             reply(self.final())])
+        result = FastResearchEngine(client, self.store, max_followups=0, subagents_per_turn=2).run('Which lab?')
+        # 一次批量委派的两个 sub 共用 main 的同一次下潜: main -> sub sub -> main
+        self.assertEqual(result['trace'], ['main', 'sub', 'sub', 'main'])
+        self.assertEqual(client.calls[1]['trace'], ['main', 'sub'])
+        self.assertEqual(client.calls[2]['trace'], ['main', 'sub', 'sub'])
+        self.assertEqual(client.calls[3]['trace'], ['main', 'sub', 'sub', 'main'])
+        self.assertEqual(result['status'], 'answered')
+        self.assertEqual(result['requests'], 4)
+        self.assertEqual([r['document_id'] for r in result['reports']], ['S1', 'S2'])
+        self.assertEqual(result['subagents_per_turn'], 2)
+        self.assertEqual([e['event'] for e in result['events'] if e['event'] in {'delegation', 'sub_result'}],
+                         ['delegation', 'sub_result', 'delegation', 'sub_result'])
+        # 批内每个 sub 仍只见自己的文档: S1 的 sub 提示词不含 S2 的内容, 反之亦然
+        self.assertNotIn('located in Oslo', client.calls[1]['messages'][0]['content'])
+        self.assertNotIn('Ada founded North Lab in 2010.', client.calls[2]['messages'][0]['content'])
+        # 两个 sub 顺序执行, 结果合并进同一条 tool 消息一次返回 main
+        tool_message = next(m for m in client.calls[3]['messages'] if m['role'] == 'tool')
+        merged = json.loads(tool_message['content'])
+        self.assertEqual([r['document_id'] for r in merged['results']], ['S1', 'S2'])
+        self.assertEqual(merged['results'][0]['findings'][0]['fact'], 'Ada founded North Lab.')
+
+    def test_batch_reinspection_truncates_to_remaining_research_budget(self):
+        client = FakeClient([reply({'findings': [self.report()['findings'][0]], 'gaps': []}),
+                             reply({'findings': [self.report()['findings'][1]], 'gaps': []}),
+                             reply({'findings': [self.report()['findings'][0]], 'gaps': []})])
+        engine = FastResearchEngine(client, self.store, max_followups=1, subagents_per_turn=2)
+        engine.query = 'Which lab?'
+        engine._delegate({'query': 'Facts', 'source_ids': ['S1']})
+        engine._delegate({'query': 'Location', 'source_ids': ['S2']})
+        # 总 sub 预算 = 2 文档 + 1 复查: 剩 1 个名额时批量复查只执行第一篇, 其余不产生 sub 请求
+        merged = engine._delegate({'query': 'Verify both', 'source_ids': ['S1', 'S2']})
+        self.assertEqual([r['document_id'] for r in merged['results'] if 'document_id' in r], ['S1'])
+        self.assertIn('S2', merged['results'][-1]['notice'])
+        self.assertEqual(engine.requests, 3)
+        self.assertFalse(engine._stalled(merged))
+
+    def test_research_tool_schema_and_duplicates_follow_subagents_per_turn(self):
+        for per_turn in (1, 2):
+            engine = FastResearchEngine(FakeClient([]), self.store, subagents_per_turn=per_turn)
+            tool = engine.research_tools[0]['function']
+            self.assertEqual(tool['parameters']['properties']['source_ids']['maxItems'], per_turn)
+        client = FakeClient([reply({'findings': [self.report()['findings'][0]], 'gaps': []})])
+        engine = FastResearchEngine(client, self.store, subagents_per_turn=2)
+        engine.query = 'Which lab?'
+        engine._delegate({'query': 'Facts', 'source_ids': ['S1', 'S1']})
+        self.assertEqual(engine.requests, 1)
 
     def test_fenced_json(self):
         self.assertEqual(parse_object('```json\n{"prediction":"A"}\n```')['prediction'], 'A')

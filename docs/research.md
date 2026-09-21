@@ -10,21 +10,23 @@
 
 精简版把本地数据处理交给代码，模型负责取证与综合：
 
-1. main 拆解问题条件，每轮通过 `research(query, source_ids)` 只分派一篇文档。`source_ids` 必须只有一个来源 ID；省略时程序选择下一篇未处理文档。main 不能把全部文档交给同一个 sub。
+1. main 拆解问题条件，每轮通过 `research(query, source_ids)` 分派一到多篇未处理文档，一次委派最多打包 `--subagents-per-turn` 篇（默认 1）。`source_ids` 省略时程序选择下一篇未处理文档。每个来源 ID 仍由一个独立的单文档 sub 处理；批内 sub 顺序执行、不并发，全部结果合并成一条工具结果返回 main。main 不能把全部文档交给同一个 sub。
 2. 程序准备该文档的阅读材料：短文档完整提供，长文档提供标题及检索命中的片段。
 3. sub 返回与问题相关的事实、原文引用和缺口，可用 `search_documents` 和 `read_passages` 补查，但程序禁止访问其他文档。默认最多两轮工具交互，之后返回 findings/gaps，由 main 接手。引用按空白归一化后检查是否来自提供的片段；校验失败时把该文档的源材料交给 main 判断。
-4. main 接收结果后给出简短阶段判断，继续安排下一篇未处理文档。每轮保留分派工具；同一回复仅执行第一个分派，后续调用须等 main 读完结果再决定。
-5. 所有文档都返回结果后，main 才能给出最终答案，或针对某一篇文档定向复查。默认最多额外复查五次；不同问题可以使用相同材料，相同任务和材料的重复请求会被拦截。请求或 main 轮数预算耗尽而尚未形成最终答案时，返回 `insufficient` 并保留证据和事件。
+4. main 接收结果后给出简短阶段判断，继续安排下一篇或下一批未处理文档。每轮保留分派工具；同一回复仅执行第一个分派，后续调用须等 main 读完结果再决定。
+5. 所有文档都返回结果后，main 才能给出最终答案，或针对若干篇文档定向复查。默认最多额外复查五次；不同问题可以使用相同材料，相同任务和材料的重复请求会被拦截。请求或 main 轮数预算耗尽而尚未形成最终答案时，返回 `insufficient` 并保留证据和事件。
 
-两篇文档的典型调用链是 `main -> sub(S1) -> main -> sub(S2) -> main(final)`。每次 sub 都是新的单文档任务上下文，main 保留历次结果并负责跨文档综合。只有一篇文档时允许一个 sub 返回后直接综合。sub 内部搜索/阅读不会改变 trace，返回 main 时才追加 main。字符预算限制输入规模，但不等于 tokenizer 的精确 token 数。
+默认（`--subagents-per-turn 1`）两篇文档的典型调用链是 `main -> sub(S1) -> main -> sub(S2) -> main(final)`；`--subagents-per-turn 2` 时为 `main -> sub(S1) -> sub(S2) -> main(final)`，两个 sub 顺序执行、结果合并后 main 再综合。每次 sub 都是新的单文档任务上下文，main 保留历次结果并负责跨文档综合。只有一篇文档时允许一个 sub 返回后直接综合。sub 内部搜索/阅读不会改变 trace；同一批 sub 共享 main 的同一次下潜（trace 呈现 `main -> sub sub -> main`），整批结束后才追加一次 main。字符预算限制输入规模，但不等于 tokenizer 的精确 token 数。
 
 ## 运行
 
-`--log-level basic` 为默认值，控制台只保留样本进度、任务分派、sub 提取的事实与缺口、错误和最终答案。
-`--log-level full` 额外显示每次模型请求、main 阶段分析、完整工具参数/结果、sub 原始输出及完整处理结果。
-两种模式均保留完整 JSONL 事件记录，不改变模型请求、证据提取或评分。fast 和 legacy 引擎均支持此参数。
+`--log-level none` 为默认值，控制台只显示 tqdm 进度条（非终端运行时自动关闭）和最终输出路径。
+`--log-level basic` 额外保留样本进度、任务分派、sub 提取的事实与缺口、错误和最终答案。
+`--log-level full` 再额外显示每次模型请求、main 阶段分析、完整工具参数/结果、sub 原始输出及完整处理结果。
+三种模式均保留完整 JSONL 事件记录，不改变模型请求、证据提取或评分。fast 和 legacy 引擎均支持此参数。
 
 ```bash
+python3 scripts/research/run_research.py --index 10
 python3 scripts/research/run_research.py --index 10 --log-level basic
 python3 scripts/research/run_research.py --index 10 --log-level full
 ```
@@ -44,6 +46,9 @@ python3 scripts/research/run_research.py --start 40 --all
 # 每篇文档各分析一次，全部完成后综合，不额外复查
 python3 scripts/research/run_research.py --index 0 --max-followups 0
 
+# 一次委派最多打包两篇文档（两个 sub 仍顺序执行、不并发，结果合并返回）
+python3 scripts/research/run_research.py --index 0 --subagents-per-turn 2
+
 # 默认每个 sub 最多两轮工具交互，随后交回 main
 python3 scripts/research/run_research.py --index 0
 # 可选：恢复不调用 sub 工具的提取模式
@@ -60,7 +65,7 @@ python3 scripts/research/run_research.py --index 0 --no-agent-mode \
 python3 scripts/research/run_research.py --index 0 --engine legacy
 ```
 
-精简引擎使用 `--max-followups`（默认 5，即全部文档处理完后最多额外复查 5 次）、`--sub-tool-rounds`（默认 2）、`--packet-chars`（默认 32000）、`--max-tokens`（默认 4096）。总分派预算为文档数量加复查次数。`--max-requests`（默认 60）和 `--max-main-turns`（默认 24）对两个引擎均生效；`--max-worker-turns` 仅影响 legacy 引擎。文档较多时需要相应调大请求及 main 轮数预算。
+精简引擎使用 `--max-followups`（默认 5，即全部文档处理完后最多额外复查 5 次）、`--sub-tool-rounds`（默认 2）、`--subagents-per-turn`（默认 1，一次委派最多打包的文档数，批内 sub 顺序执行不并发）、`--packet-chars`（默认 32000）、`--max-tokens`（默认 4096）。总分派预算为文档数量加复查次数；一次委派打包数超过剩余分派预算时，只执行靠前的文档，其余以 notice 退回，不产生模型请求。该参数仅对 fast 引擎生效，legacy 引擎传大于 1 的值会直接报错。`--max-requests`（默认 60）和 `--max-main-turns`（默认 24）对两个引擎均生效；`--max-worker-turns` 仅影响 legacy 引擎。文档较多时需要相应调大请求及 main 轮数预算。
 
 `--release-kv` 在每条样本结束时释放其服务端 KV。实际缓存复用量由 LMInfer 实现决定，以输出中的统计为准。
 

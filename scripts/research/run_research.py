@@ -9,6 +9,8 @@ from pathlib import Path
 import re
 import sys
 
+from tqdm import tqdm
+
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -50,10 +52,12 @@ def parse_args():
     parser.add_argument("--enable-thinking", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--release-kv", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--engine", choices=("fast", "legacy"), default="fast")
-    parser.add_argument("--log-level", choices=("basic", "full"), default="basic",
-                        help="Console logs: basic progress/results (default), or full model/tool details; JSONL events remain complete")
+    parser.add_argument("--log-level", choices=("none", "basic", "full"), default="none",
+                        help="Console logs: none (default, only progress bar), basic progress/results, or full model/tool details; JSONL events remain complete")
     parser.add_argument("--max-followups", type=int, default=5, help="Targeted single-document reinspections after every document is analyzed (fast engine)")
     parser.add_argument("--sub-tool-rounds", type=int, default=2, help="Sub tool-round cap per task; default 2, 0 uses supplied passages only")
+    parser.add_argument("--subagents-per-turn", type=positive, default=1,
+                        help="每次 research 委派最多打包的文档数(每篇一个单文档 sub, 批内仍顺序执行不并发); 仅 fast 引擎, 默认 1")
     parser.add_argument("--packet-chars", type=positive, default=32000)
     parser.add_argument("--max-requests", type=positive, default=60)
     parser.add_argument("--max-main-turns", type=positive, default=24)
@@ -103,14 +107,26 @@ def compact_row(row):
     return {k: row[k] for k in COMPACT_FIELDS if k in row}
 
 
+def count_subagents(row):
+    """一个样本实际派发的 subagent 数: fast 引擎一条 delegation 事件对应一个 sub,
+    legacy 引擎数 main 的 delegate 工具调用; 重复委派被去重挡回的不产生事件, 不计数."""
+    return sum(1 for e in row.get("events", [])
+               if isinstance(e, dict) and (
+                   e.get("event") == "delegation"
+                   or (e.get("event") == "tool" and e.get("role") == "main" and e.get("name") == "delegate")))
+
+
 def run(args):
+    if args.engine == "legacy" and args.subagents_per_turn > 1:
+        raise ValueError("--subagents-per-turn 仅支持 fast 引擎(legacy 每轮固定一个 worker)")
     samples = json.loads(args.metadata.read_text(encoding="utf-8"))
     if not isinstance(samples, list):
         raise ValueError("metadata must be an array")
     start = start_index(samples, args.index, args.query_id)
     if not 0 <= start < len(samples):
         raise ValueError("index must be in range")
-    if args.query_id is not None:
+    verbose = args.log_level != "none"
+    if verbose and args.query_id is not None:
         print(f"[SELECT] query_id={args.query_id} -> index={start}", flush=True)
     stop = len(samples) if args.all else min(len(samples), start + args.limit)
     output = args.output or default_output_path(args.model_name or args.model)
@@ -118,57 +134,67 @@ def run(args):
     output.parent.mkdir(parents=True, exist_ok=True)
     compact_output.parent.mkdir(parents=True, exist_ok=True)
     rows = []
-    for index in range(start, stop):
-        sample = samples[index]
-        store = None
-        client = LLMClient(base_url=args.base_url, api_key=args.api_key, model=args.model, timeout=args.timeout,
-                           agent_mode=args.agent_mode, enable_thinking=args.enable_thinking)
-        engine = None
-        try:
-            # Both retrieval state and LLM session are fresh for every sample.
-            store = SourceStore(sample_paths(sample, args.metadata))
-            print(f"[SAMPLE] index={index} query_id={sample['query_id']} documents={len(store.sources)}", flush=True)
-            if args.engine == "fast":
-                engine = FastResearchEngine(client, store, max_followups=args.max_followups,
-                                            packet_chars=args.packet_chars, max_tokens=args.max_tokens,
-                                            temperature=args.temperature, max_sub_tool_rounds=args.sub_tool_rounds,
-                                            max_main_turns=args.max_main_turns, max_requests=args.max_requests,
+    # disable=None: 非终端(nohup/管道)时自动关闭, 不往日志文件里刷进度条
+    with tqdm(total=stop - start, unit="sample", dynamic_ncols=True, disable=None) as pbar:
+        for index in range(start, stop):
+            pbar.set_description(f"sample {index}")
+            sample = samples[index]
+            pbar.set_postfix_str(str(sample["query_id"]))
+            store = None
+            client = LLMClient(base_url=args.base_url, api_key=args.api_key, model=args.model, timeout=args.timeout,
+                               agent_mode=args.agent_mode, enable_thinking=args.enable_thinking)
+            engine = None
+            try:
+                # Both retrieval state and LLM session are fresh for every sample.
+                store = SourceStore(sample_paths(sample, args.metadata))
+                if verbose:
+                    print(f"[SAMPLE] index={index} query_id={sample['query_id']} documents={len(store.sources)}", flush=True)
+                if args.engine == "fast":
+                    engine = FastResearchEngine(client, store, max_followups=args.max_followups,
+                                                packet_chars=args.packet_chars, max_tokens=args.max_tokens,
+                                                temperature=args.temperature, max_sub_tool_rounds=args.sub_tool_rounds,
+                                                max_main_turns=args.max_main_turns, max_requests=args.max_requests,
+                                                log_level=args.log_level, subagents_per_turn=args.subagents_per_turn)
+                else:
+                    engine = ResearchEngine(client, store, max_requests=args.max_requests,
+                                            max_main_turns=args.max_main_turns, max_worker_turns=args.max_worker_turns,
+                                            max_tokens=args.max_tokens, temperature=args.temperature,
                                             log_level=args.log_level)
-            else:
-                engine = ResearchEngine(client, store, max_requests=args.max_requests,
-                                        max_main_turns=args.max_main_turns, max_worker_turns=args.max_worker_turns,
-                                        max_tokens=args.max_tokens, temperature=args.temperature,
-                                        log_level=args.log_level)
-            result = engine.run(sample["query"])
-            row = {"index": index, "query_id": sample["query_id"], **result,
-                   "source_mode": "sample_evidence_docs", "prediction": result["answer"]}
-            # Gold is used only after research, never included in prompts or the index.
-            row.update(gold=sample["answer"], metrics=score_prediction(result["answer"], sample["answer"]))
-        except Exception as exc:
-            row = {"index": index, "query_id": sample.get("query_id"), "error": repr(exc),
-                   "events": engine.events if engine else [],
-                   "evidence": (list(engine.evidence.values()) if isinstance(engine.evidence, dict) else engine.evidence) if engine else []}
-        finally:
-            if store is not None:
-                store.db.close()
-            if args.release_kv and client.session_id:
-                try:
-                    client.release_kv()
-                except Exception as exc:
-                    print(f"[release warning] {exc}", file=sys.stderr)
-            client.session.close()
-        with output.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
-        with compact_output.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(compact_row(row), ensure_ascii=False) + "\n")
-        rows.append(row)
-        print(json.dumps({k: v for k, v in row.items() if k in {"index", "status", "prediction", "error", "metrics"}}, ensure_ascii=False))
+                result = engine.run(sample["query"])
+                row = {"index": index, "query_id": sample["query_id"], **result,
+                       "source_mode": "sample_evidence_docs", "prediction": result["answer"]}
+                # Gold is used only after research, never included in prompts or the index.
+                row.update(gold=sample["answer"], metrics=score_prediction(result["answer"], sample["answer"]))
+            except Exception as exc:
+                row = {"index": index, "query_id": sample.get("query_id"), "error": repr(exc),
+                       "events": engine.events if engine else [],
+                       "evidence": (list(engine.evidence.values()) if isinstance(engine.evidence, dict) else engine.evidence) if engine else []}
+            finally:
+                if store is not None:
+                    store.db.close()
+                if args.release_kv and client.session_id:
+                    try:
+                        client.release_kv()
+                    except Exception as exc:
+                        print(f"[release warning] {exc}", file=sys.stderr)
+                client.session.close()
+            with output.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+            with compact_output.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(compact_row(row), ensure_ascii=False) + "\n")
+            rows.append(row)
+            if verbose:
+                print(json.dumps({k: v for k, v in row.items() if k in {"index", "status", "prediction", "error", "metrics"}}, ensure_ascii=False))
+            pbar.update(1)
     summary = {"metadata": str(args.metadata), "model": args.model,
                "model_name": args.model_name or args.model,
+               "subagents_per_turn": args.subagents_per_turn,
                "num_requested": len(rows),
                "num_completed": sum("error" not in r for r in rows),
                "num_errors": sum("error" in r for r in rows),
-               "num_answered": sum(r.get("status") == "answered" for r in rows), "metrics": mean_scores(rows)}
+               "num_answered": sum(r.get("status") == "answered" for r in rows),
+               "num_subagents": sum(count_subagents(r) for r in rows),
+               "metrics": mean_scores(rows)}
     output.with_suffix(".summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n")
     print(f"[output] {output}")
     print(f"[compact_output] {compact_output}")

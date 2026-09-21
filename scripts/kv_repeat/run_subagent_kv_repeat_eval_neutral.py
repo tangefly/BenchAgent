@@ -309,12 +309,15 @@ def run_one(row: Dict[str, Any], dataset_index: int, args: argparse.Namespace) -
     messages: List[Dict[str, Any]] = [make_first_message(build_main_task(subagent_task))]
 
     try:
+        # Bare "required" makes GLM-4.7-Flash (vLLM glm47 parser) loop tool calls
+        # until max_tokens (finish_reason=length, dozens of parallel calls); the
+        # named-function form forces the same single call through the normal path.
         main_first, main_first_ms, main_first_usage, main_first_reused = chat_timed(
             client,
             messages,
             trace=trace,
             tools=tools_json,
-            tool_choice="required",
+            tool_choice={"type": "function", "function": {"name": "call_subagent"}},
             temperature=args.temperature,
             max_tokens=args.max_tokens,
         )
