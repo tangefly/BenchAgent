@@ -4,7 +4,7 @@ import io
 from contextlib import redirect_stdout
 
 from agent.research import SourceStore
-from agent.research_fast import FastResearchEngine, parse_object
+from agent.research_fast import FastResearchEngine, parse_object, tool_result_text
 from test_research import FakeClient, call, reply
 
 
@@ -190,7 +190,8 @@ class FastResearchTests(unittest.TestCase):
         self.assertNotIn('Ada founded North Lab in 2010.', client.calls[3]['messages'][0]['content'])
         self.assertIn('Ada founded North Lab', client.calls[2]['messages'][-2]['content'])
         self.assertIsNotNone(client.calls[2]['tools'])
-        self.assertIsNone(client.calls[-1]['tools'])
+        # tools 恒定传入: 收口轮不再藏工具, 保证 main prompt 的模板头部逐请求稳定
+        self.assertIsNotNone(client.calls[-1]['tools'])
         events = [e['event'] for e in result['events'] if e['event'] in {'delegation', 'sub_result'}]
         self.assertEqual(events, ['delegation', 'sub_result', 'delegation', 'sub_result'])
 
@@ -236,7 +237,7 @@ class FastResearchTests(unittest.TestCase):
         result = FastResearchEngine(client, self.store, max_followups=1).run('Which lab?')
         self.assertEqual(result['status'], 'answered')
         self.assertEqual([r['document_id'] for r in result['reports']], ['S1', 'S2', 'S1'])
-        self.assertIsNone(client.calls[-1]['tools'])
+        self.assertIsNotNone(client.calls[-1]['tools'])
 
     def test_duplicate_reinspection_does_not_start_worker(self):
         engine = FastResearchEngine(FakeClient([reply(self.report()), reply(self.report())]), self.store)
@@ -301,7 +302,10 @@ class FastResearchTests(unittest.TestCase):
         tool_message = next(m for m in client.calls[3]['messages'] if m['role'] == 'tool')
         merged = json.loads(tool_message['content'])
         self.assertEqual([r['document_id'] for r in merged['results']], ['S1', 'S2'])
-        self.assertEqual(merged['results'][0]['findings'][0]['fact'], 'Ada founded North Lab.')
+        # sub 原文逐字嵌入 report 字段(供 LMInfer 按位拼接输出 KV), 元数据在外层
+        self.assertEqual(merged['results'][0]['report']['findings'][0]['fact'], 'Ada founded North Lab.')
+        self.assertIn(json.dumps({'findings': [self.report()['findings'][0]], 'gaps': []}),
+                      tool_message['content'])
 
     def test_batch_reinspection_truncates_to_remaining_research_budget(self):
         client = FakeClient([reply({'findings': [self.report()['findings'][0]], 'gaps': []}),
@@ -331,6 +335,24 @@ class FastResearchTests(unittest.TestCase):
 
     def test_fenced_json(self):
         self.assertEqual(parse_object('```json\n{"prediction":"A"}\n```')['prediction'], 'A')
+
+    def test_tool_result_text_embeds_raw_output_and_keeps_valid_json(self):
+        raw = json.dumps({'findings': [{'source_id': 'S1', 'fact': 'F', 'quote': 'Q'}], 'gaps': ['g']})
+        row = {'task_id': 1, 'document_id': 'S1', 'task': 'Facts', 'remaining_documents': ['S2'],
+               'warnings': [], 'coverage': [{'source_id': 'S1', 'complete': True, 'ranges': [[0, 30]]}],
+               'findings': json.loads(raw)['findings'], 'gaps': ['g'], '_raw': raw}
+        text = tool_result_text(row)
+        merged = json.loads(text)                       # 拼接后整体仍是合法 JSON
+        self.assertEqual(merged['report'], json.loads(raw))
+        self.assertIn(raw, text)                        # sub 输出逐字节出现
+        # findings/gaps 只保留在原文里, 元数据部分不重复序列化
+        self.assertNotIn('findings', text[:text.index('"report"')])
+        # 非 sub 行(通知/报错)照常序列化; 批量结果逐行拼接
+        self.assertEqual(tool_result_text({'notice': 'stop'}), '{"notice": "stop"}')
+        batch = tool_result_text({'results': [{'document_id': 'S1', '_raw': raw}, {'notice': 'budget'}]})
+        merged_batch = json.loads(batch)
+        self.assertEqual(merged_batch['results'][0]['report'], json.loads(raw))
+        self.assertEqual(merged_batch['results'][1], {'notice': 'budget'})
 
 
 if __name__ == '__main__':

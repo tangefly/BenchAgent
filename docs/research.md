@@ -18,6 +18,8 @@
 
 默认（`--subagents-per-turn 1`）两篇文档的典型调用链是 `main -> sub(S1) -> main -> sub(S2) -> main(final)`；`--subagents-per-turn 2` 时为 `main -> sub(S1) -> sub(S2) -> main(final)`，两个 sub 顺序执行、结果合并后 main 再综合。每次 sub 都是新的单文档任务上下文，main 保留历次结果并负责跨文档综合。只有一篇文档时允许一个 sub 返回后直接综合。sub 内部搜索/阅读不会改变 trace；同一批 sub 共享 main 的同一次下潜（trace 呈现 `main -> sub sub -> main`），整批结束后才追加一次 main。字符预算限制输入规模，但不等于 tokenizer 的精确 token 数。
 
+为配合 LMInfer 的 sub 输出 KV 拼接，sub 的最终输出在恰好是 JSON object 时会以 `report` 字段**逐字**嵌入工具结果（`{"results": [原文, ...]}`，外层只放 `task_id`/`document_id`/`warnings`/`coverage` 等元数据，findings/gaps 不再重复序列化）——main prompt 里的这段文本与 sub 生成的 token 序列逐位一致，服务端才能按位拼接其输出 KV；带围栏或夹杂说明文字时退回旧的清洗结构。另外 main 的请求恒定携带 research 工具定义（预算用尽或停摆收口时不再隐藏工具），保证 Qwen3 模板渲染的 prompt 头部跨请求稳定，否则已保存 main 段的前缀 KV 复用会因模板头变化而清零。
+
 ## 运行
 
 `--log-level none` 为默认值，控制台只显示 tqdm 进度条（非终端运行时自动关闭）和最终输出路径。
